@@ -132,3 +132,38 @@ def test_s2_not_found():
     with patch("api_clients.semantic_scholar.requests.get", return_value=mock_resp):
         result = lookup_semantic_scholar(doi="10.9999/fake")
     assert result is None
+
+
+from api_clients.scholarly_client import lookup_scholarly
+
+
+def test_scholarly_finds_paper():
+    mock_result = {
+        "bib": {
+            "title": "Machine Learning Study",
+            "abstract": "This paper studies ML.",
+            "author": ["John Smith"],
+            "pub_year": "2020",
+            "venue": "Journal of AI",
+        },
+        "pub_url": "https://example.com/paper",
+        "eprint_url": "https://example.com/paper.pdf",
+    }
+    with patch("api_clients.scholarly_client.scholarly") as mock_scholarly:
+        mock_scholarly.search_pubs.return_value = iter([mock_result])
+        result = lookup_scholarly("Machine Learning Study")
+    assert result["abstract"] == "This paper studies ML."
+    assert result["pdf_url"] == "https://example.com/paper.pdf"
+
+
+def test_scholarly_no_results():
+    with patch("api_clients.scholarly_client.scholarly") as mock_scholarly:
+        mock_scholarly.search_pubs.return_value = iter([])
+        result = lookup_scholarly("Nonexistent Paper XYZ123")
+    assert result is None
+
+
+def test_scholarly_disabled():
+    with patch("api_clients.scholarly_client.SCHOLARLY_ENABLED", False):
+        result = lookup_scholarly("Any Title")
+    assert result is None
