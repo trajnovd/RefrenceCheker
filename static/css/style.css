@@ -327,6 +327,7 @@ h1, h2, h3, h4 {
 .result-card {
   background: var(--color-card-bg);
   border-radius: var(--radius);
+  position: relative;
   border-left: 5px solid var(--color-muted);
   padding: 1.25rem 1.5rem;
   transition: border-color var(--transition-speed) ease;
@@ -346,6 +347,18 @@ h1, h2, h3, h4 {
 
 .result-card--error {
   border-left-color: var(--color-error);
+}
+
+.result-card__bib-key {
+  display: inline-block;
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 0.7rem;
+  color: var(--color-muted);
+  background: var(--color-bg);
+  padding: 0.15rem 0.5rem;
+  border-radius: 3px;
+  margin-bottom: 0.4rem;
+  letter-spacing: 0.02em;
 }
 
 .result-card__header {

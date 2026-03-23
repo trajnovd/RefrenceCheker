@@ -128,6 +128,11 @@
 
     var html = '';
 
+    // Bib key label
+    if (result.bib_key) {
+      html += '<span class="result-card__bib-key">' + escapeHtml(result.bib_key) + '</span>';
+    }
+
     // Header row: icon + title
     html += '<div class="result-card__header">';
     html += statusIcon(result.status);
