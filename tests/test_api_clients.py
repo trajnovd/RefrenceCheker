@@ -98,30 +98,23 @@ def test_s2_search_by_doi():
 
 
 def test_s2_search_by_title():
-    search_resp = Mock()
-    search_resp.status_code = 200
-    search_resp.json.return_value = {
+    # Match endpoint returns full data in one call
+    match_resp = Mock()
+    match_resp.status_code = 200
+    match_resp.json.return_value = {
         "data": [{
             "paperId": "abc123",
             "title": "Machine Learning Study",
+            "abstract": "This paper studies ML.",
             "year": 2020,
-            "authors": [{"name": "John Smith"}]
+            "citationCount": 42,
+            "isOpenAccess": False,
+            "openAccessPdf": None,
+            "authors": [{"name": "John Smith"}],
+            "externalIds": {"DOI": "10.1234/test"}
         }]
     }
-    detail_resp = Mock()
-    detail_resp.status_code = 200
-    detail_resp.json.return_value = {
-        "paperId": "abc123",
-        "title": "Machine Learning Study",
-        "abstract": "This paper studies ML.",
-        "year": 2020,
-        "citationCount": 42,
-        "isOpenAccess": False,
-        "openAccessPdf": None,
-        "authors": [{"name": "John Smith"}],
-        "externalIds": {"DOI": "10.1234/test"}
-    }
-    with patch("api_clients.semantic_scholar.requests.get", side_effect=[search_resp, detail_resp]):
+    with patch("api_clients.semantic_scholar.requests.get", return_value=match_resp):
         result = lookup_semantic_scholar(title="Machine Learning Study", year="2020")
     assert result["abstract"] == "This paper studies ML."
 

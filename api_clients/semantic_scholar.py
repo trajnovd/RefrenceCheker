@@ -1,11 +1,15 @@
 import threading
 import time
 import re
+import logging
 import requests
+
+logger = logging.getLogger(__name__)
 
 _lock = threading.Lock()
 _last_call = 0.0
-_DELAY = 0.5
+_DELAY = 1.1  # S2 free tier: ~1 req/sec
+_blocked = False
 
 FIELDS = "paperId,title,abstract,year,citationCount,isOpenAccess,openAccessPdf,authors,externalIds"
 
@@ -43,6 +47,9 @@ def _parse_paper(data):
 
 def lookup_semantic_scholar(doi=None, title=None, year=None, authors_hint=None,
                             timeout=10, max_retries=3):
+    global _blocked
+    if _blocked:
+        return None
     if doi:
         return _lookup_by_doi(doi, timeout, max_retries)
     if title:
@@ -50,7 +57,16 @@ def lookup_semantic_scholar(doi=None, title=None, year=None, authors_hint=None,
     return None
 
 
+def _handle_429(attempt):
+    """Handle rate limiting. If we've been blocked too many times, disable for session."""
+    global _blocked
+    wait = 10 * (attempt + 1)  # 10s, 20s, 30s
+    logger.warning(f"S2 rate limited (429). Waiting {wait}s (attempt {attempt+1})")
+    time.sleep(wait)
+
+
 def _lookup_by_doi(doi, timeout, max_retries):
+    global _blocked
     url = f"https://api.semanticscholar.org/graph/v1/paper/DOI:{doi}"
     params = {"fields": FIELDS}
     for attempt in range(max_retries):
@@ -58,7 +74,10 @@ def _lookup_by_doi(doi, timeout, max_retries):
             _rate_limit()
             resp = requests.get(url, params=params, timeout=timeout)
             if resp.status_code == 429:
-                time.sleep(2 ** attempt)
+                _handle_429(attempt)
+                if attempt == max_retries - 1:
+                    _blocked = True
+                    logger.warning("S2 persistently rate-limited. Disabling for session.")
                 continue
             if resp.status_code != 200:
                 return None
@@ -71,25 +90,45 @@ def _lookup_by_doi(doi, timeout, max_retries):
 
 
 def _lookup_by_title(title, year, authors_hint, timeout, max_retries):
-    url = "https://api.semanticscholar.org/graph/v1/paper/search"
-    params = {"query": title, "limit": 5, "fields": "paperId,title,year,authors"}
+    global _blocked
+    # Use the /match endpoint first — single call, returns best match with full fields
+    url = "https://api.semanticscholar.org/graph/v1/paper/search/match"
+    params = {"query": title, "fields": FIELDS}
     for attempt in range(max_retries):
         try:
             _rate_limit()
             resp = requests.get(url, params=params, timeout=timeout)
             if resp.status_code == 429:
-                time.sleep(2 ** attempt)
+                _handle_429(attempt)
+                if attempt == max_retries - 1:
+                    _blocked = True
+                    logger.warning("S2 persistently rate-limited. Disabling for session.")
                 continue
+            if resp.status_code == 404:
+                # Match endpoint returns 404 when no match found
+                return None
             if resp.status_code != 200:
                 return None
             data = resp.json().get("data", [])
             if not data:
                 return None
-            best = _pick_best(data, title, year, authors_hint)
-            if not best:
-                return None
-            # Fetch full details
-            return _fetch_details(best["paperId"], timeout, max_retries)
+            # Match endpoint returns best match first — verify it's reasonable
+            best = data[0]
+            norm_query = _normalize(title)
+            norm_result = _normalize(best.get("title", ""))
+            # Accept if titles are similar enough
+            if norm_query == norm_result:
+                return _parse_paper(best)
+            if norm_query in norm_result or norm_result in norm_query:
+                return _parse_paper(best)
+            # Fuzzy check: if >70% of words overlap
+            query_words = set(norm_query.split())
+            result_words = set(norm_result.split())
+            if query_words and result_words:
+                overlap = len(query_words & result_words) / max(len(query_words), len(result_words))
+                if overlap > 0.6:
+                    return _parse_paper(best)
+            return None
         except Exception:
             if attempt < max_retries - 1:
                 time.sleep(2 ** attempt)
@@ -117,24 +156,4 @@ def _pick_best(candidates, title, year, authors_hint):
         if score > best_score:
             best_score = score
             best = c
-    return best if best_score >= 4 else None
-
-
-def _fetch_details(paper_id, timeout, max_retries):
-    url = f"https://api.semanticscholar.org/graph/v1/paper/{paper_id}"
-    params = {"fields": FIELDS}
-    for attempt in range(max_retries):
-        try:
-            _rate_limit()
-            resp = requests.get(url, params=params, timeout=timeout)
-            if resp.status_code == 429:
-                time.sleep(2 ** attempt)
-                continue
-            if resp.status_code != 200:
-                return None
-            return _parse_paper(resp.json())
-        except Exception:
-            if attempt < max_retries - 1:
-                time.sleep(2 ** attempt)
-            continue
-    return None
+    return best if best_score >= 3 else None
