@@ -1,4 +1,23 @@
+import re
 import bibtexparser
+
+
+def _clean_latex(text):
+    """Remove LaTeX artifacts from text: braces, commands, etc."""
+    if not text:
+        return text
+    # Remove LaTeX commands like \"{o}, \'{e}, \c{c}, \H{o}, etc. → keep the letter
+    text = re.sub(r'\\["\'^`~Hcvudtb]\{(\w)\}', r'\1', text)
+    text = re.sub(r'\\["\'^`~Hcvudtb](\w)', r'\1', text)
+    # Remove other LaTeX commands like \textbf{...} → keep content
+    text = re.sub(r'\\[a-zA-Z]+\{([^}]*)\}', r'\1', text)
+    # Remove remaining braces
+    text = text.replace('{', '').replace('}', '')
+    # Remove backslashes
+    text = text.replace('\\', '')
+    # Clean up multiple spaces
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
 
 
 def parse_bib_file(filepath):
@@ -34,11 +53,11 @@ def parse_bib_string(bib_string):
         bib_key = entry.key
         fields = {f.key: f.value for f in entry.fields}
 
-        title = fields.get("title", "").strip().strip("{}")
+        title = _clean_latex(fields.get("title", "").strip())
         doi = fields.get("doi", "").strip()
-        authors = fields.get("author", "")
+        authors = _clean_latex(fields.get("author", ""))
         year = fields.get("year", "").strip()
-        journal = fields.get("journal", "") or fields.get("booktitle", "")
+        journal = _clean_latex(fields.get("journal", "") or fields.get("booktitle", ""))
         url = fields.get("url", "").strip()
 
         # Deduplicate by DOI
@@ -62,7 +81,7 @@ def parse_bib_string(bib_string):
             "title": title or None,
             "authors": authors,
             "year": year or None,
-            "journal": journal.strip().strip("{}") or None,
+            "journal": journal or None,
             "doi": doi or None,
             "url": url or None,
             "status": status,

@@ -75,11 +75,13 @@ def create_app():
         if session is None:
             return jsonify({"error": "Session not found"}), 404
 
+        # Capture before entering generator (request context won't be available inside)
+        last_id = request.headers.get("Last-Event-ID")
+        initial_sent = int(last_id) + 1 if last_id and last_id.isdigit() else 0
+
         def generate():
             import time
-            # Support reconnection: resume from Last-Event-ID
-            last_id = request.headers.get("Last-Event-ID")
-            sent = int(last_id) + 1 if last_id and last_id.isdigit() else 0
+            sent = initial_sent
             last_heartbeat = time.time()
             while True:
                 session = store.get(session_id)
