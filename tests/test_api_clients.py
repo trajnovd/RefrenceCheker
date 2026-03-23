@@ -131,27 +131,32 @@ from api_clients.scholarly_client import lookup_scholarly
 
 
 def test_scholarly_finds_paper():
-    mock_result = {
-        "bib": {
-            "title": "Machine Learning Study",
-            "abstract": "This paper studies ML.",
-            "author": ["John Smith"],
-            "pub_year": "2020",
-            "venue": "Journal of AI",
-        },
-        "pub_url": "https://example.com/paper",
-        "eprint_url": "https://example.com/paper.pdf",
-    }
-    with patch("api_clients.scholarly_client.scholarly") as mock_scholarly:
-        mock_scholarly.search_pubs.return_value = iter([mock_result])
+    # Mock the HTML response from Google Scholar
+    html = '''<div class="gs_r gs_or gs_scl">
+        <div class="gs_ggs"><a href="https://example.com/paper.pdf">[PDF]</a></div>
+        <div class="gs_ri">
+            <h3 class="gs_rt"><a href="https://example.com/paper">Machine Learning Study</a></h3>
+            <div class="gs_a">J Smith, J Doe - Journal of AI, 2020 - Publisher</div>
+            <div class="gs_rs">This paper studies ML in depth with novel approaches.</div>
+        </div>
+    </div>'''
+    mock_resp = Mock()
+    mock_resp.status_code = 200
+    mock_resp.text = html
+    with patch("api_clients.scholarly_client.requests.get", return_value=mock_resp):
         result = lookup_scholarly("Machine Learning Study")
-    assert result["abstract"] == "This paper studies ML."
+    assert result is not None
+    assert result["title"] == "Machine Learning Study"
+    assert "ML" in result["abstract"]
     assert result["pdf_url"] == "https://example.com/paper.pdf"
 
 
 def test_scholarly_no_results():
-    with patch("api_clients.scholarly_client.scholarly") as mock_scholarly:
-        mock_scholarly.search_pubs.return_value = iter([])
+    html = '<div class="gs_r gs_or"><div class="gs_ri"><div class="gs_rs">No results</div></div></div>'
+    mock_resp = Mock()
+    mock_resp.status_code = 200
+    mock_resp.text = '<html><body></body></html>'
+    with patch("api_clients.scholarly_client.requests.get", return_value=mock_resp):
         result = lookup_scholarly("Nonexistent Paper XYZ123")
     assert result is None
 

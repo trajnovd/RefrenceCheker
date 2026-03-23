@@ -79,14 +79,16 @@ def process_reference(ref):
                 if "unpaywall" not in result["sources"]:
                     result["sources"].append("unpaywall")
 
-    # Step 3: Scholarly fallback
-    if not result["abstract"] and not result["pdf_url"] and title:
+    # Step 3: Google Scholar fallback (when no abstract AND no PDF found yet)
+    if not result.get("abstract") and not result.get("pdf_url") and title:
         sch = lookup_scholarly(title)
         if sch:
             result["sources"].append("scholarly")
             result["abstract"] = result["abstract"] or sch.get("abstract")
             if not result["pdf_url"] and sch.get("pdf_url"):
                 result["pdf_url"] = sch["pdf_url"]
+            if not result["url"] and sch.get("url"):
+                result["url"] = sch["url"]
 
     # Determine final status
     if result["pdf_url"]:

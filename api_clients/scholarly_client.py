@@ -1,19 +1,24 @@
 import threading
 import time
 import logging
+import re
+import requests
+from bs4 import BeautifulSoup
 from config import SCHOLARLY_ENABLED
 
 logger = logging.getLogger(__name__)
 
 _lock = threading.Lock()
 _last_call = 0.0
-_DELAY = 1.0
+_DELAY = 2.0  # Be conservative with Google Scholar
 _disabled = False
+_consecutive_failures = 0
 
-try:
-    from scholarly import scholarly
-except ImportError:
-    scholarly = None
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
 
 
 def _rate_limit():
@@ -27,26 +32,103 @@ def _rate_limit():
 
 
 def lookup_scholarly(title, timeout=15):
-    global _disabled
-    if not SCHOLARLY_ENABLED or _disabled or scholarly is None:
+    global _disabled, _consecutive_failures
+    if not SCHOLARLY_ENABLED or _disabled:
         return None
     try:
         _rate_limit()
-        results = scholarly.search_pubs(title)
-        first = next(results, None)
-        if not first:
-            return None
-        bib = first.get("bib", {})
-        return {
-            "title": bib.get("title"),
-            "abstract": bib.get("abstract"),
-            "authors": bib.get("author", []),
-            "year": bib.get("pub_year"),
-            "journal": bib.get("venue"),
-            "url": first.get("pub_url"),
-            "pdf_url": first.get("eprint_url"),
-        }
+        result = _search_google_scholar(title, timeout)
+        if result:
+            _consecutive_failures = 0
+        return result
     except Exception as e:
-        logger.warning(f"Scholarly lookup failed: {e}. Disabling for this session.")
-        _disabled = True
+        _consecutive_failures += 1
+        logger.warning(f"Google Scholar lookup failed: {e}")
+        if _consecutive_failures >= 3:
+            logger.warning("Google Scholar: 3 consecutive failures. Disabling for session.")
+            _disabled = True
         return None
+
+
+def _search_google_scholar(title, timeout):
+    """Search Google Scholar directly via HTTP and parse the HTML results."""
+    url = "https://scholar.google.com/scholar"
+    params = {"q": f'"{title}"', "hl": "en", "num": 3}
+
+    resp = requests.get(url, params=params, headers=HEADERS, timeout=timeout)
+
+    if resp.status_code == 429 or "captcha" in resp.text.lower():
+        logger.warning("Google Scholar returned 429 or CAPTCHA")
+        raise Exception("Rate limited by Google Scholar")
+
+    if resp.status_code != 200:
+        return None
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    results = soup.select("div.gs_r.gs_or.gs_scl")
+
+    if not results:
+        # Try without quotes for a broader search
+        params["q"] = title
+        resp = requests.get(url, params=params, headers=HEADERS, timeout=timeout)
+        if resp.status_code != 200:
+            return None
+        soup = BeautifulSoup(resp.text, "html.parser")
+        results = soup.select("div.gs_r.gs_or.gs_scl")
+
+    if not results:
+        return None
+
+    # Parse the first result
+    first = results[0]
+
+    # Title and URL
+    title_el = first.select_one("h3.gs_rt a")
+    found_title = title_el.get_text(strip=True) if title_el else None
+    found_url = title_el["href"] if title_el and title_el.has_attr("href") else None
+
+    # Abstract/snippet
+    abstract_el = first.select_one("div.gs_rs")
+    abstract = abstract_el.get_text(strip=True) if abstract_el else None
+
+    # PDF link (the [PDF] link on the right side)
+    pdf_url = None
+    pdf_link = first.select_one("div.gs_ggs a")
+    if pdf_link and pdf_link.has_attr("href"):
+        href = pdf_link["href"]
+        if href.endswith(".pdf") or "pdf" in href.lower():
+            pdf_url = href
+
+    # Meta info (authors, year, venue)
+    meta_el = first.select_one("div.gs_a")
+    authors = []
+    year = None
+    journal = None
+    if meta_el:
+        meta_text = meta_el.get_text(strip=True)
+        # Format is usually: "Author1, Author2 - Journal, Year - Publisher"
+        parts = meta_text.split(" - ")
+        if parts:
+            authors = [a.strip() for a in parts[0].split(",") if a.strip() and not a.strip().isdigit()]
+        # Extract year
+        year_match = re.search(r'\b(19|20)\d{2}\b', meta_text)
+        if year_match:
+            year = year_match.group()
+        # Extract journal (second part)
+        if len(parts) > 1:
+            journal = parts[1].strip().rstrip(",").strip()
+            # Remove year from journal
+            journal = re.sub(r',?\s*(19|20)\d{2}', '', journal).strip()
+
+    if not found_title and not abstract:
+        return None
+
+    return {
+        "title": found_title,
+        "abstract": abstract,
+        "authors": authors,
+        "year": year,
+        "journal": journal or None,
+        "url": found_url,
+        "pdf_url": pdf_url,
+    }
