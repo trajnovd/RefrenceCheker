@@ -34,12 +34,18 @@ def _rate_limit():
 def lookup_scholarly(title, timeout=15):
     global _disabled, _consecutive_failures
     if not SCHOLARLY_ENABLED or _disabled:
+        logger.debug("Scholarly query skipped (disabled=%s): title=%s", _disabled, title)
         return None
+    logger.debug("Scholarly query: title=%s", title)
     try:
         _rate_limit()
         result = _search_google_scholar(title, timeout)
         if result:
             _consecutive_failures = 0
+            logger.debug("Scholarly result: title=%s url=%s pdf=%s abstract=%s",
+                          title, result.get("url"), result.get("pdf_url"), bool(result.get("abstract")))
+        else:
+            logger.debug("Scholarly result: title=%s found=None", title)
         return result
     except Exception as e:
         _consecutive_failures += 1
@@ -58,25 +64,31 @@ def _search_google_scholar(title, timeout):
     resp = requests.get(url, params=params, headers=HEADERS, timeout=timeout)
 
     if resp.status_code == 429 or "captcha" in resp.text.lower():
-        logger.warning("Google Scholar returned 429 or CAPTCHA")
-        raise Exception("Rate limited by Google Scholar")
+        global _disabled
+        _disabled = True
+        logger.warning("Google Scholar returned 429 or CAPTCHA. Disabling for session.")
+        return None
 
     if resp.status_code != 200:
+        logger.debug("Scholarly failed: title=%s status=%d body=%s", title, resp.status_code, resp.text[:200])
         return None
 
     soup = BeautifulSoup(resp.text, "html.parser")
     results = soup.select("div.gs_r.gs_or.gs_scl")
 
     if not results:
+        logger.debug("Scholarly no results with exact match, retrying broad: title=%s", title)
         # Try without quotes for a broader search
         params["q"] = title
         resp = requests.get(url, params=params, headers=HEADERS, timeout=timeout)
         if resp.status_code != 200:
+            logger.debug("Scholarly broad retry failed: title=%s status=%d", title, resp.status_code)
             return None
         soup = BeautifulSoup(resp.text, "html.parser")
         results = soup.select("div.gs_r.gs_or.gs_scl")
 
     if not results:
+        logger.debug("Scholarly no results found at all: title=%s", title)
         return None
 
     # Parse the first result
@@ -121,6 +133,7 @@ def _search_google_scholar(title, timeout):
             journal = re.sub(r',?\s*(19|20)\d{2}', '', journal).strip()
 
     if not found_title and not abstract:
+        logger.debug("Scholarly parsed but no title/abstract extracted: title=%s", title)
         return None
 
     return {

@@ -1,0 +1,2 @@
+Requirement already satisfied: bibtexparser in C:\Users\dimit\miniconda3\envs\ref\Lib\site-packages (1.4.4)
+Requirement already satisfied: pyparsing>=2.0.3 in C:\Users\dimit\miniconda3\envs\ref\Lib\site-packages (from bibtexparser) (3.3.2)

@@ -51,6 +51,7 @@ def parse_bib_string(bib_string):
 
     for entry in library.entries:
         bib_key = entry.key
+        entry_type = entry.entry_type.lower() if hasattr(entry, 'entry_type') else ""
         fields = {f.key: f.value for f in entry.fields}
 
         title = _clean_latex(fields.get("title", "").strip())
@@ -59,6 +60,35 @@ def parse_bib_string(bib_string):
         year = fields.get("year", "").strip()
         journal = _clean_latex(fields.get("journal", "") or fields.get("booktitle", ""))
         url = fields.get("url", "").strip()
+
+        # Extract URL from howpublished or note if url field is empty
+        if not url:
+            for fallback_field in ("howpublished", "note"):
+                val = fields.get(fallback_field, "")
+                m = re.search(r'\\url\{([^}]+)\}', val)
+                if m:
+                    url = m.group(1).strip()
+                    break
+                m = re.search(r'(https?://[^\s,}]+)', val)
+                if m:
+                    url = m.group(1).strip()
+                    break
+
+        # Extract arXiv ID from eprint field or URL
+        arxiv_id = None
+        eprint = fields.get("eprint", "").strip()
+        if eprint and fields.get("archiveprefix", "").strip().lower() == "arxiv":
+            arxiv_id = eprint
+        elif eprint and re.match(r"^\d{4}\.\d{4,5}(v\d+)?$", eprint):
+            arxiv_id = eprint
+        if not arxiv_id and url:
+            m = re.search(r"arxiv\.org/(?:abs|pdf)/(\d{4}\.\d{4,5}(?:v\d+)?)", url)
+            if m:
+                arxiv_id = m.group(1)
+        if not arxiv_id and doi:
+            m = re.match(r"10\.48550/arXiv\.(.+)", doi, re.IGNORECASE)
+            if m:
+                arxiv_id = m.group(1)
 
         # Deduplicate by DOI
         if doi:
@@ -76,15 +106,25 @@ def parse_bib_string(bib_string):
         if not title and not doi:
             status = "insufficient_data"
 
+        # Build raw BibTeX string for display
+        raw_bib = f"@{entry_type}{{{bib_key},\n"
+        for f in entry.fields:
+            raw_bib += f"  {f.key} = {{{f.value}}},\n"
+        raw_bib += "}"
+
         results.append({
             "bib_key": bib_key,
+            "entry_type": entry_type,
             "title": title or None,
             "authors": authors,
             "year": year or None,
             "journal": journal or None,
             "doi": doi or None,
             "url": url or None,
+            "arxiv_id": arxiv_id,
             "status": status,
+            "all_fields": {f.key: f.value for f in entry.fields},
+            "raw_bib": raw_bib,
         })
 
     return results

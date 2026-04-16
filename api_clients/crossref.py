@@ -1,6 +1,9 @@
 import threading
 import time
+import logging
 import requests
+
+logger = logging.getLogger(__name__)
 
 _lock = threading.Lock()
 _last_call = 0.0
@@ -19,14 +22,18 @@ def _rate_limit():
 
 def lookup_crossref(doi, timeout=10, max_retries=3):
     url = f"https://api.crossref.org/works/{doi}"
+    logger.debug("CrossRef query: doi=%s", doi)
     for attempt in range(max_retries):
         try:
             _rate_limit()
             resp = requests.get(url, timeout=timeout)
+            logger.debug("CrossRef response: status=%d doi=%s", resp.status_code, doi)
             if resp.status_code == 429:
+                logger.debug("CrossRef rate-limited (429): doi=%s attempt=%d", doi, attempt)
                 time.sleep(2 ** attempt)
                 continue
             if resp.status_code != 200:
+                logger.debug("CrossRef failed: doi=%s status=%d body=%s", doi, resp.status_code, resp.text[:200])
                 return None
             msg = resp.json().get("message", {})
             titles = msg.get("title", [])
@@ -39,14 +46,17 @@ def lookup_crossref(doi, timeout=10, max_retries=3):
             pub = msg.get("published-print") or msg.get("published-online") or {}
             date_parts = pub.get("date-parts", [[]])
             year = str(date_parts[0][0]) if date_parts and date_parts[0] else None
-            return {
+            result = {
                 "title": titles[0] if titles else None,
                 "authors": authors,
                 "journal": container[0] if container else None,
                 "year": year,
                 "url": msg.get("URL"),
             }
-        except Exception:
+            logger.debug("CrossRef result: doi=%s title=%s", doi, result.get("title"))
+            return result
+        except Exception as e:
+            logger.debug("CrossRef error: doi=%s attempt=%d error=%s", doi, attempt, e)
             if attempt < max_retries - 1:
                 time.sleep(2 ** attempt)
             continue

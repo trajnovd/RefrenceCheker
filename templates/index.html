@@ -6,11 +6,33 @@
   <title>References Checker</title>
   <meta name="description" content="Upload a .bib file to verify references, find PDFs, and check availability across academic databases.">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+  <script type="importmap">
+  {
+    "imports": {
+      "codemirror":                     "https://esm.sh/*codemirror",
+      "@codemirror/autocomplete":       "https://esm.sh/*@codemirror/autocomplete",
+      "@codemirror/commands":           "https://esm.sh/*@codemirror/commands",
+      "@codemirror/language":           "https://esm.sh/*@codemirror/language",
+      "@codemirror/lint":               "https://esm.sh/*@codemirror/lint",
+      "@codemirror/search":             "https://esm.sh/*@codemirror/search",
+      "@codemirror/state":              "https://esm.sh/*@codemirror/state",
+      "@codemirror/view":               "https://esm.sh/*@codemirror/view",
+      "@codemirror/legacy-modes/":      "https://esm.sh/*@codemirror/legacy-modes/",
+      "@lezer/common":                  "https://esm.sh/*@lezer/common",
+      "@lezer/highlight":               "https://esm.sh/*@lezer/highlight",
+      "@lezer/lr":                      "https://esm.sh/*@lezer/lr",
+      "crelt":                          "https://esm.sh/*crelt",
+      "style-mod":                      "https://esm.sh/*style-mod",
+      "w3c-keyname":                    "https://esm.sh/*w3c-keyname",
+      "@marijn/find-cluster-break":     "https://esm.sh/*@marijn/find-cluster-break"
+    }
+  }
+  </script>
 </head>
 <body>
 
   <!-- ========== Header ========== -->
-  <header class="app-header">
+  <header class="app-header" id="app-header">
     <div class="container">
       <h1 class="app-header__title">References Checker</h1>
       <p class="app-header__subtitle">Upload a .bib file to verify your references across academic databases</p>
@@ -19,8 +41,99 @@
 
   <main class="container">
 
+    <!-- ========== View 0: Projects ========== -->
+    <section id="view-projects" class="view view--active projects-section" aria-label="Your projects">
+
+      <div class="projects-header">
+        <h2 class="projects-header__title">Your Projects</h2>
+        <div class="projects-create">
+          <input
+            type="text"
+            id="project-name-input"
+            class="projects-create__input"
+            placeholder="New project name&hellip;"
+            autocomplete="off"
+          >
+          <button type="button" id="create-project-btn" class="btn btn--primary btn--small" aria-label="Create new project">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            Create
+          </button>
+        </div>
+      </div>
+
+      <div id="projects-grid" class="projects-grid" aria-label="Projects list">
+      </div>
+      <p id="no-projects-msg" class="no-results-msg" style="display:none;">No projects yet. Create one to get started.</p>
+    </section>
+
+    <!-- ========== View 0.5: Project Dashboard ========== -->
+    <section id="view-dashboard" class="view dashboard-section" aria-label="Project dashboard">
+
+      <div class="breadcrumb">
+        <button type="button" id="dash-back-btn" class="btn-link">&larr; All Projects</button>
+      </div>
+
+      <h2 class="dashboard__title" id="dash-project-name"></h2>
+
+      <!-- Actions row -->
+      <div class="dashboard__actions">
+        <div class="dashboard__action-card">
+          <h3>References (.bib)</h3>
+          <p class="dashboard__action-desc" id="dash-bib-status">No .bib file uploaded yet</p>
+          <div class="dashboard__action-btns">
+            <label class="btn btn--primary btn--small" id="dash-upload-bib-label">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+              Upload .bib
+              <input type="file" id="dash-bib-input" class="file-input" accept=".bib">
+            </label>
+            <button type="button" id="dash-view-refs-btn" class="btn btn--outline btn--small" disabled>View References</button>
+          </div>
+        </div>
+
+        <div class="dashboard__action-card">
+          <h3>LaTeX Document (.tex)</h3>
+          <p class="dashboard__action-desc" id="dash-tex-status">No .tex file uploaded yet</p>
+          <div class="dashboard__action-btns">
+            <label class="btn btn--primary btn--small" id="dash-upload-tex-label">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+              Upload .tex
+              <input type="file" id="dash-tex-input" class="file-input" accept=".tex">
+            </label>
+            <button type="button" id="dash-review-btn" class="btn btn--outline btn--small" disabled>Citation Review</button>
+          </div>
+        </div>
+
+        <div class="dashboard__action-card">
+          <h3>Export</h3>
+          <p class="dashboard__action-desc">Download results as CSV or PDF report</p>
+          <div class="dashboard__action-btns">
+            <button type="button" id="dash-csv-btn" class="btn btn--outline btn--small" disabled>Download CSV</button>
+            <button type="button" id="dash-pdf-btn" class="btn btn--outline btn--small" disabled>Download PDF</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Reference statistics -->
+      <div id="dash-stats" class="dashboard__stats" style="display:none;">
+        <h3>Reference Statistics</h3>
+        <div class="stats-bar" role="region" aria-label="Reference statistics">
+          <div class="stat-item stat-item--total">Total: <span id="dash-stat-total">0</span></div>
+          <div class="stat-item stat-item--pdf">PDF Found: <span id="dash-stat-pdf">0</span></div>
+          <div class="stat-item stat-item--abstract">Abstract Only: <span id="dash-stat-abstract">0</span></div>
+          <div class="stat-item stat-item--webpage">Web Page: <span id="dash-stat-webpage">0</span></div>
+          <div class="stat-item stat-item--notfound">Not Found: <span id="dash-stat-notfound">0</span></div>
+        </div>
+      </div>
+
+    </section>
+
     <!-- ========== View 1: Upload ========== -->
-    <section id="view-upload" class="view view--active upload-section" aria-label="Upload a BibTeX file">
+    <section id="view-upload" class="view upload-section" aria-label="Upload a BibTeX file">
+
+      <div class="breadcrumb">
+        <button type="button" id="back-to-projects-upload" class="btn-link" aria-label="Back to projects">&larr; Back to Projects</button>
+        <span id="upload-project-name" class="breadcrumb__name"></span>
+      </div>
 
       <div id="drop-zone" class="drop-zone" role="button" tabindex="0" aria-label="Drag and drop a .bib file here, or click to browse">
         <svg class="drop-zone__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -77,6 +190,11 @@
     <!-- ========== View 3: Results ========== -->
     <section id="view-results" class="view results-section" aria-label="Reference check results">
 
+      <div class="breadcrumb">
+        <button type="button" id="back-to-projects-results" class="btn-link" aria-label="Back to projects">&larr; Back to Projects</button>
+        <span id="results-project-name" class="breadcrumb__name"></span>
+      </div>
+
       <!-- Stats bar -->
       <div class="stats-bar" role="region" aria-label="Results summary">
         <div class="stat-item stat-item--total">
@@ -90,6 +208,10 @@
         <div class="stat-item stat-item--abstract">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
           Abstract Only: <span id="stat-abstract">0</span>
+        </div>
+        <div class="stat-item stat-item--webpage">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+          Web Page: <span id="stat-webpage">0</span>
         </div>
         <div class="stat-item stat-item--notfound">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
@@ -127,17 +249,78 @@
       </div>
       <p id="no-results-msg" class="no-results-msg" style="display:none;">No matching references found.</p>
 
-      <!-- Footer: new check -->
+      <!-- Footer -->
       <div class="results-footer">
-        <button type="button" id="new-check-btn" class="btn btn--cta" aria-label="Start a new reference check">
+        <button type="button" id="new-check-btn" class="btn btn--cta" aria-label="Upload new .bib file">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-          New Check
+          Upload New .bib
         </button>
+        <label class="btn btn--primary" aria-label="Upload LaTeX for citation review" id="upload-tex-label">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+          Upload LaTeX
+          <input type="file" id="tex-file-input" class="file-input" accept=".tex">
+        </label>
+      </div>
+    </section>
+
+    <!-- ========== View 4: Citation Review ========== -->
+    <section id="view-review" class="view review-section" aria-label="Citation context review">
+      <div class="review-panels">
+        <!-- ===== LEFT COLUMN ===== -->
+        <div class="review-left">
+          <!-- Left header: nav bar -->
+          <div class="review-left__header">
+            <button type="button" id="review-back-btn" class="btn-link">&larr; Back</button>
+            <span id="review-tex-filename" class="review-left__filename"></span>
+            <button type="button" id="review-save-tex-btn" class="btn btn--outline btn--small" title="Save changes">Save</button>
+            <a id="review-download-tex-btn" class="btn btn--outline btn--small" title="Download .tex file" download>Download</a>
+            <div class="review-left__nav">
+              <button type="button" id="review-prev-btn" class="btn btn--outline btn--small">&lt; Prev</button>
+              <span id="review-counter" class="review-left__counter">0 / 0</span>
+              <button type="button" id="review-next-btn" class="btn btn--outline btn--small">Next &gt;</button>
+            </div>
+          </div>
+          <!-- LaTeX editor (CodeMirror 6) -->
+          <div id="review-cm-editor" class="review-cm-editor"></div>
+        </div>
+
+        <!-- ===== RIGHT COLUMN ===== -->
+        <div class="review-right">
+          <!-- Right header: reference info + actions -->
+          <div class="review-right__header">
+            <div class="review-refbar__top">
+              <div class="review-refbar__main">
+                <span class="review-refbar__key" id="review-ref-key"></span>
+                <span class="review-refbar__title" id="review-ref-title"></span>
+              </div>
+              <div class="review-right__actions">
+                <button type="button" id="review-set-link-btn" class="btn btn--outline btn--small" title="Set link manually">Set Link</button>
+                <button type="button" id="review-refresh-btn" class="btn btn--outline btn--small" title="Refresh reference">Refresh</button>
+              </div>
+            </div>
+            <div class="review-refbar__details" id="review-ref-meta"></div>
+          </div>
+          <!-- Tab bar -->
+          <div class="review-ref__tabs">
+            <button type="button" class="review-tab" id="review-tab-pdf" data-tab="pdf">PDF</button>
+            <button type="button" class="review-tab" id="review-tab-html" data-tab="html">HTML</button>
+            <button type="button" class="review-tab" id="review-tab-abstract" data-tab="abstract">Abstract</button>
+            <button type="button" class="review-tab" id="review-tab-bibtex" data-tab="bibtex">BibTeX</button>
+          </div>
+          <!-- Content area -->
+          <div class="review-ref__content" id="review-ref-content">
+            <iframe id="review-iframe" class="review-ref__iframe" style="display:none;"></iframe>
+            <div id="review-abstract-text" class="review-ref__abstract" style="display:none;"></div>
+            <pre id="review-bibtex-text" class="review-ref__bibtex" style="display:none;"></pre>
+            <div id="review-no-content" class="review-ref__empty" style="display:none;">No content available for this reference.</div>
+          </div>
+        </div>
       </div>
     </section>
 
   </main>
 
   <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+  <script type="module" src="{{ url_for('static', filename='js/cm-setup.js') }}"></script>
 </body>
 </html>

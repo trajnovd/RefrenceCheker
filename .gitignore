@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 *.zip
 .env
+projects/
+debug.log
