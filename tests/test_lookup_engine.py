@@ -61,6 +61,18 @@ def test_process_reference_insufficient_data():
     assert result["status"] == "insufficient_data"
 
 
+def test_process_reference_preserves_raw_bib():
+    """raw_bib must survive process_reference so the BibTeX tab keeps working
+    after Refresh / Add Reference (regression: was stripped, leaving the
+    BibTeX tab dimmed after manual operations)."""
+    ref = {"bib_key": "smith2020", "title": None, "doi": None,
+           "authors": "", "year": None, "journal": None, "url": None,
+           "status": "insufficient_data",
+           "raw_bib": "@article{smith2020, title={X}, year={2020}}"}
+    result = process_reference(ref)
+    assert result.get("raw_bib") == "@article{smith2020, title={X}, year={2020}}"
+
+
 def test_process_all_calls_callback():
     refs = [
         {"bib_key": "a", "title": "Paper A", "doi": None,

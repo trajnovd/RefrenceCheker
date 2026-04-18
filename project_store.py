@@ -184,6 +184,140 @@ def save_results_batch(slug, results_list):
         _write_json(slug, data)
 
 
+def add_parsed_ref(slug, ref):
+    """Append a single parsed_ref to project.json. Returns True on success,
+    False if a parsed_ref with the same bib_key already exists.
+    """
+    bib_key = ref.get("bib_key")
+    if not bib_key:
+        return False
+    lock = _get_lock(slug)
+    with lock:
+        data = _read_json(slug)
+        if data is None:
+            return False
+        existing = {r.get("bib_key") for r in (data.get("parsed_refs") or [])}
+        if bib_key in existing:
+            return False
+        data.setdefault("parsed_refs", []).append(ref)
+        data["total"] = len(data["parsed_refs"])
+        data["updated_at"] = datetime.now().isoformat()
+        _write_json(slug, data)
+        return True
+
+
+def save_claim_check(slug, cache_key, verdict_dict):
+    """Persist a single claim-check verdict under project.json["claim_checks"][cache_key]."""
+    lock = _get_lock(slug)
+    with lock:
+        data = _read_json(slug)
+        if data is None:
+            return
+        checks = data.get("claim_checks") or {}
+        checks[cache_key] = verdict_dict
+        data["claim_checks"] = checks
+        data["updated_at"] = datetime.now().isoformat()
+        _write_json(slug, data)
+
+
+def set_citation_check_key(slug, citation_index, cache_key):
+    """Point citations[citation_index]["claim_check_key"] at the verdict cache_key.
+
+    Pass cache_key=None to clear the pointer.
+    """
+    lock = _get_lock(slug)
+    with lock:
+        data = _read_json(slug)
+        if data is None:
+            return
+        citations = data.get("citations") or []
+        if 0 <= citation_index < len(citations):
+            if cache_key is None:
+                citations[citation_index].pop("claim_check_key", None)
+            else:
+                citations[citation_index]["claim_check_key"] = cache_key
+            data["citations"] = citations
+            data["updated_at"] = datetime.now().isoformat()
+            _write_json(slug, data)
+
+
+def get_claim_check(slug, cache_key):
+    data = _read_json(slug)
+    if data is None:
+        return None
+    return (data.get("claim_checks") or {}).get(cache_key)
+
+
+def save_ref_match(slug, bib_key, match_dict):
+    """Update result.ref_match for the given bib_key. Returns True on success.
+
+    Embedded in the result (not a separate dict) so it survives result rebuilds:
+    every persisted result already carries this field.
+    """
+    if not bib_key:
+        return False
+    lock = _get_lock(slug)
+    with lock:
+        data = _read_json(slug)
+        if data is None:
+            return False
+        for r in data.get("results") or []:
+            if r.get("bib_key") == bib_key:
+                if match_dict is None:
+                    r.pop("ref_match", None)
+                else:
+                    r["ref_match"] = match_dict
+                data["updated_at"] = datetime.now().isoformat()
+                _write_json(slug, data)
+                return True
+        return False
+
+
+def get_ref_match(slug, bib_key):
+    data = _read_json(slug)
+    if data is None:
+        return None
+    for r in data.get("results") or []:
+        if r.get("bib_key") == bib_key:
+            return r.get("ref_match")
+    return None
+
+
+def set_last_viewed_citation(slug, citation_index):
+    lock = _get_lock(slug)
+    with lock:
+        data = _read_json(slug)
+        if data is None:
+            return
+        data["last_viewed_citation"] = citation_index
+        _write_json(slug, data)
+
+
+def get_last_viewed_citation(slug):
+    data = _read_json(slug)
+    if data is None:
+        return 0
+    return data.get("last_viewed_citation", 0)
+
+
+def add_activity(slug, activity_type, message, target=None):
+    """Append an entry to the project's activity log. Capped at 50 entries."""
+    lock = _get_lock(slug)
+    with lock:
+        data = _read_json(slug)
+        if data is None:
+            return
+        log = data.get("activity") or []
+        entry = {"ts": datetime.now().isoformat(), "type": activity_type, "message": message}
+        if target:
+            entry["target"] = target
+        log.append(entry)
+        if len(log) > 50:
+            log = log[-50:]
+        data["activity"] = log
+        _write_json(slug, data)
+
+
 def get_parsed_ref(slug, bib_key):
     data = _read_json(slug)
     if data is None:

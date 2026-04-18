@@ -74,7 +74,9 @@ def parse_bib_string(bib_string):
                     url = m.group(1).strip()
                     break
 
-        # Extract arXiv ID from eprint field or URL
+        # Extract arXiv ID from eprint field, URL, DOI, or any other field containing
+        # an "arXiv:NNNN.NNNNN" marker (common in journal/note/howpublished when authors
+        # cite preprints — e.g. `journal = {arXiv preprint arXiv:2111.09395}`).
         arxiv_id = None
         eprint = fields.get("eprint", "").strip()
         if eprint and fields.get("archiveprefix", "").strip().lower() == "arxiv":
@@ -89,6 +91,16 @@ def parse_bib_string(bib_string):
             m = re.match(r"10\.48550/arXiv\.(.+)", doi, re.IGNORECASE)
             if m:
                 arxiv_id = m.group(1)
+        if not arxiv_id:
+            # Scan common free-text fields for "arXiv:NNNN.NNNNN"
+            for fname in ("journal", "booktitle", "note", "howpublished", "series"):
+                fval = fields.get(fname, "")
+                if not fval:
+                    continue
+                m = re.search(r"arXiv\s*:\s*(\d{4}\.\d{4,5}(?:v\d+)?)", fval, re.IGNORECASE)
+                if m:
+                    arxiv_id = m.group(1)
+                    break
 
         # Deduplicate by DOI
         if doi:

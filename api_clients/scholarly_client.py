@@ -56,6 +56,88 @@ def lookup_scholarly(title, timeout=15):
         return None
 
 
+_TITLE_OVERLAP_THRESHOLD = 0.6  # min fraction of query words that must appear in result title
+
+
+def _normalize(text):
+    """Lowercase and strip non-alphanumerics for word-overlap comparison."""
+    return re.sub(r"[^\w\s]", " ", (text or "").lower()).strip()
+
+
+def _is_relevant(query_title, result_title):
+    """Reject results whose title doesn't overlap enough with the query.
+
+    Scholar's broad (no-quote) retry happily returns related-but-different papers
+    for unique-sounding bib titles (regression: chiang2025llm "LLMs for Corporate
+    Transparency: Evaluating Earnings Call Q&A" matched a different COLING 2025
+    paper). Without this guard, the wrong paper gets downloaded as the source.
+    """
+    if not result_title:
+        return False
+    qwords = set(_normalize(query_title).split())
+    twords = set(_normalize(result_title).split())
+    if not qwords:
+        return True
+    overlap = len(qwords & twords) / len(qwords)
+    return overlap >= _TITLE_OVERLAP_THRESHOLD
+
+
+def _parse_scholar_result(result):
+    """Extract title/url/abstract/pdf/meta from one Scholar result element."""
+    title_el = result.select_one("h3.gs_rt a")
+    found_title = title_el.get_text(strip=True) if title_el else None
+    found_url = title_el["href"] if title_el and title_el.has_attr("href") else None
+
+    abstract_el = result.select_one("div.gs_rs")
+    abstract = abstract_el.get_text(strip=True) if abstract_el else None
+
+    pdf_url = None
+    pdf_link = result.select_one("div.gs_ggs a")
+    if pdf_link and pdf_link.has_attr("href"):
+        href = pdf_link["href"]
+        if href.endswith(".pdf") or "pdf" in href.lower():
+            pdf_url = href
+
+    meta_el = result.select_one("div.gs_a")
+    authors, year, journal = [], None, None
+    if meta_el:
+        meta_text = meta_el.get_text(strip=True)
+        parts = meta_text.split(" - ")
+        if parts:
+            authors = [a.strip() for a in parts[0].split(",") if a.strip() and not a.strip().isdigit()]
+        year_match = re.search(r'\b(19|20)\d{2}\b', meta_text)
+        if year_match:
+            year = year_match.group()
+        if len(parts) > 1:
+            journal = parts[1].strip().rstrip(",").strip()
+            journal = re.sub(r',?\s*(19|20)\d{2}', '', journal).strip()
+
+    return {
+        "title": found_title,
+        "abstract": abstract,
+        "authors": authors,
+        "year": year,
+        "journal": journal or None,
+        "url": found_url,
+        "pdf_url": pdf_url,
+    }
+
+
+def _pick_relevant(results, query_title):
+    """Walk Scholar results and return the first whose title passes the overlap
+    threshold. Returns None if none qualify (better than returning a wrong paper).
+    """
+    for r in results:
+        parsed = _parse_scholar_result(r)
+        if not parsed.get("title") and not parsed.get("abstract"):
+            continue
+        if _is_relevant(query_title, parsed.get("title")):
+            return parsed
+        logger.debug("Scholarly skipping low-overlap result: query=%r got=%r",
+                     query_title, parsed.get("title"))
+    return None
+
+
 def _search_google_scholar(title, timeout):
     """Search Google Scholar directly via HTTP and parse the HTML results."""
     url = "https://scholar.google.com/scholar"
@@ -76,8 +158,10 @@ def _search_google_scholar(title, timeout):
     soup = BeautifulSoup(resp.text, "html.parser")
     results = soup.select("div.gs_r.gs_or.gs_scl")
 
-    if not results:
-        logger.debug("Scholarly no results with exact match, retrying broad: title=%s", title)
+    picked = _pick_relevant(results, title) if results else None
+
+    if not picked:
+        logger.debug("Scholarly: no relevant exact-match result, retrying broad: title=%s", title)
         # Try without quotes for a broader search
         params["q"] = title
         resp = requests.get(url, params=params, headers=HEADERS, timeout=timeout)
@@ -86,62 +170,10 @@ def _search_google_scholar(title, timeout):
             return None
         soup = BeautifulSoup(resp.text, "html.parser")
         results = soup.select("div.gs_r.gs_or.gs_scl")
+        picked = _pick_relevant(results, title) if results else None
 
-    if not results:
-        logger.debug("Scholarly no results found at all: title=%s", title)
+    if not picked:
+        logger.debug("Scholarly no relevant results after both passes: title=%s", title)
         return None
 
-    # Parse the first result
-    first = results[0]
-
-    # Title and URL
-    title_el = first.select_one("h3.gs_rt a")
-    found_title = title_el.get_text(strip=True) if title_el else None
-    found_url = title_el["href"] if title_el and title_el.has_attr("href") else None
-
-    # Abstract/snippet
-    abstract_el = first.select_one("div.gs_rs")
-    abstract = abstract_el.get_text(strip=True) if abstract_el else None
-
-    # PDF link (the [PDF] link on the right side)
-    pdf_url = None
-    pdf_link = first.select_one("div.gs_ggs a")
-    if pdf_link and pdf_link.has_attr("href"):
-        href = pdf_link["href"]
-        if href.endswith(".pdf") or "pdf" in href.lower():
-            pdf_url = href
-
-    # Meta info (authors, year, venue)
-    meta_el = first.select_one("div.gs_a")
-    authors = []
-    year = None
-    journal = None
-    if meta_el:
-        meta_text = meta_el.get_text(strip=True)
-        # Format is usually: "Author1, Author2 - Journal, Year - Publisher"
-        parts = meta_text.split(" - ")
-        if parts:
-            authors = [a.strip() for a in parts[0].split(",") if a.strip() and not a.strip().isdigit()]
-        # Extract year
-        year_match = re.search(r'\b(19|20)\d{2}\b', meta_text)
-        if year_match:
-            year = year_match.group()
-        # Extract journal (second part)
-        if len(parts) > 1:
-            journal = parts[1].strip().rstrip(",").strip()
-            # Remove year from journal
-            journal = re.sub(r',?\s*(19|20)\d{2}', '', journal).strip()
-
-    if not found_title and not abstract:
-        logger.debug("Scholarly parsed but no title/abstract extracted: title=%s", title)
-        return None
-
-    return {
-        "title": found_title,
-        "abstract": abstract,
-        "authors": authors,
-        "year": year,
-        "journal": journal or None,
-        "url": found_url,
-        "pdf_url": pdf_url,
-    }
+    return picked

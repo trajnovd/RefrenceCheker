@@ -1,4 +1,4 @@
-from bib_parser import parse_bib_file
+from bib_parser import parse_bib_file, parse_bib_string
 
 def test_parse_basic_entries():
     results = parse_bib_file("tests/fixtures/sample.bib")
@@ -29,6 +29,33 @@ def test_handles_unicode():
     uni = next(r for r in results if r["bib_key"] == "unicode2021")
     assert uni["doi"] == "10.5678/unicode.2021"
     assert uni["title"] is not None
+
+def test_extracts_arxiv_id_from_eprint_field():
+    bib = "@article{x, title={T}, eprint={2111.09395}, archiveprefix={arXiv}}"
+    refs = parse_bib_string(bib)
+    assert refs[0]["arxiv_id"] == "2111.09395"
+
+
+def test_extracts_arxiv_id_from_journal_field():
+    """Regression: bib entries like @article{...journal={arXiv preprint arXiv:2111.09395}...}
+    must yield arxiv_id so process_reference's Step 0 kicks in — otherwise lookup
+    falls through to SSRN / publisher sites that often bot-block."""
+    bib = """@article{liu2022finrl,
+      author = {Xiao-Yang Liu and others},
+      title = {FinRL: A Deep RL Library for Automated Stock Trading},
+      journal = {arXiv preprint arXiv:2111.09395},
+      year = {2022},
+    }"""
+    refs = parse_bib_string(bib)
+    assert refs[0]["arxiv_id"] == "2111.09395"
+
+
+def test_extracts_arxiv_id_from_note_and_howpublished():
+    for field_name in ("note", "howpublished", "booktitle"):
+        bib = '@misc{x, title={T}, ' + field_name + '={See arXiv:1706.03762 for details}}'
+        refs = parse_bib_string(bib)
+        assert refs[0]["arxiv_id"] == "1706.03762", f"missed arxiv_id in {field_name}"
+
 
 def test_empty_file_returns_empty():
     import tempfile, os

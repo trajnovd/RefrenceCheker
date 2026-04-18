@@ -18,6 +18,70 @@ import re
 BOOK_TYPES = {"book", "inbook", "incollection", "booklet", "proceedings", "inproceedings"}
 _ARXIV_DOI_RE = re.compile(r"^10\.48550/arXiv\.(.+)$", re.IGNORECASE)
 
+# arXiv submission IDs encode the year:
+#   - Modern (2007+): YYMM.NNNNN  →  20YY  (e.g. "1602.03032" → 2016)
+#   - Legacy:         <subject>/YYMMNNN  →  19YY or 20YY  (e.g. "math/0102001" → 2001)
+_ARXIV_MODERN_RE = re.compile(r"^(\d{2})(\d{2})\.\d{4,5}", re.IGNORECASE)
+_ARXIV_LEGACY_RE = re.compile(r"^[a-z\-.]+/(\d{2})(\d{2})\d{3}", re.IGNORECASE)
+
+
+def _arxiv_year(arxiv_id):
+    """Best-effort: extract the submission year from an arXiv id. Returns int or None.
+
+    Used to reject title-search overrides where the year is wildly off — e.g. arXiv
+    1602.03032 ("LSTM: A Search Space Odyssey", 2016) coming back for the bib's
+    1997 LSTM paper. A short generic title shared between papers decades apart
+    is a common wrong-paper failure mode for fuzzy title search.
+    """
+    if not arxiv_id:
+        return None
+    s = arxiv_id.strip().lower()
+    m = _ARXIV_MODERN_RE.match(s)
+    if m:
+        yy = int(m.group(1))
+        return 2000 + yy if yy < 91 else 1900 + yy   # arXiv started 1991
+    m = _ARXIV_LEGACY_RE.match(s)
+    if m:
+        yy = int(m.group(1))
+        return 2000 + yy if yy < 91 else 1900 + yy
+    return None
+
+
+def _years_compatible(bib_year, arxiv_year, max_gap=3):
+    """Two years are compatible if both unknown, or one unknown, or within max_gap.
+
+    A small gap (<=3 years) accommodates legitimate cases like a paper posted to
+    arXiv as a preprint earlier than the journal publication, or vice-versa.
+    """
+    if bib_year is None or arxiv_year is None:
+        return True
+    try:
+        return abs(int(bib_year) - int(arxiv_year)) <= max_gap
+    except (TypeError, ValueError):
+        return True
+
+# Publisher domains that bot-block anonymous PDF downloads (Cloudflare / JS challenges,
+# cookie-walled, paywalled with partial OA pretence via Unpaywall, etc.).
+# When Unpaywall/OpenAlex/S2 returns one of these as pdf_url, it's worth asking Google
+# Search for an alternate non-fragile mirror (university .edu, author homepage, arXiv).
+_FRAGILE_PDF_DOMAINS = (
+    "onlinelibrary.wiley.com",
+    "papers.ssrn.com",
+    "econstor.eu",
+    "sciencedirect.com",
+    "link.springer.com",
+    "jstor.org",
+    "tandfonline.com",
+    "academic.oup.com",     # Oxford Academic — Cloudflare-protected like Wiley
+)
+
+
+def _is_fragile_pdf(url):
+    if not url:
+        return False
+    u = url.lower()
+    return any(d in u for d in _FRAGILE_PDF_DOMAINS)
+
 logger = logging.getLogger(__name__)
 
 
@@ -29,7 +93,57 @@ def _log_step(bib_key, source, found, detail=""):
     logger.info(msg)
 
 
-def process_reference(ref):
+def _humanize_bib_url_failure(failure_info):
+    """Compose a user-facing error message from pre_download_bib_url failure info."""
+    kind = (failure_info or {}).get("kind") or "unknown"
+    code = (failure_info or {}).get("http_status")
+    url = (failure_info or {}).get("url") or ""
+    if kind == "http_4xx" and code:
+        return f"Bib URL returned HTTP {code} (citation is unreachable — fix the URL)"
+    if kind == "http_5xx" and code:
+        return f"Bib URL returned HTTP {code} (server error — fix the URL or retry later)"
+    if kind == "network":
+        return "Bib URL is unreachable (network error — check the URL)"
+    if kind == "validation":
+        detail = (failure_info or {}).get("detail") or ""
+        return f"Bib URL did not return valid content ({detail or 'invalid response'})"
+    return f"Bib URL is unreachable ({kind})"
+
+
+def make_bib_url_unreachable_result(ref, failure_info):
+    """Build a result dict for a reference whose bib URL could not be downloaded.
+
+    Used in place of process_reference when the bib supplied a URL but it 4xx'd /
+    timed out / failed validation. Skipping the lookup pipeline avoids the very
+    common failure where a generic title-search finds an unrelated paper and
+    downloads it as the "source" (e.g. @misc{ManTrendFollowing} -> some random
+    arXiv paper titled "Trend-Following").
+    """
+    bib_key = ref["bib_key"]
+    return {
+        "bib_key": bib_key,
+        "title": ref.get("title"),
+        "authors": ref.get("authors") if isinstance(ref.get("authors"), list)
+                   else [ref.get("authors")] if ref.get("authors") else [],
+        "year": ref.get("year"),
+        "journal": ref.get("journal"),
+        "doi": ref.get("doi"),
+        "abstract": None,
+        "pdf_url": None,
+        "url": ref.get("url"),
+        "citation_count": None,
+        "sources": ["URL"],
+        "status": "bib_url_unreachable",
+        "error": _humanize_bib_url_failure(failure_info),
+        "bib_url_failure": {
+            "http_status": (failure_info or {}).get("http_status"),
+            "kind": (failure_info or {}).get("kind"),
+        },
+        "raw_bib": ref.get("raw_bib"),
+    }
+
+
+def process_reference(ref, metadata_only=False):
     bib_key = ref["bib_key"]
 
     if ref.get("status") == "insufficient_data":
@@ -48,6 +162,7 @@ def process_reference(ref):
             "sources": [],
             "status": "insufficient_data",
             "error": "No title or DOI in .bib entry",
+            "raw_bib": ref.get("raw_bib"),
         }
 
     title = ref.get("title")
@@ -73,6 +188,8 @@ def process_reference(ref):
         "sources": [],
         "status": "not_found",
         "error": None,
+        # Carry raw_bib forward so the BibTeX tab keeps working after Refresh / Add Reference.
+        "raw_bib": ref.get("raw_bib"),
     }
 
     # Step 0: If we have an arXiv ID (from eprint, URL, or DOI), set PDF link immediately
@@ -159,20 +276,52 @@ def process_reference(ref):
               f"pdf={'yes' if s2 and s2.get('pdf_url') else 'no'} "
               f"citations={s2.get('citation_count') if s2 else None}" if s2 else "")
 
-    # Step 2.5: arXiv search (if no PDF found yet, search by title)
-    if not result.get("pdf_url") and title and not arxiv_id:
+    # Step 2.5: arXiv search by title. Runs even when we already have a pdf_url, so
+    # that preprints on arXiv can replace publisher/SSRN URLs that often 403.
+    # BUT: when the bib entry had a DOI AND a DOI-based source (CrossRef/Unpaywall)
+    # already set the pdf_url, we TRUST that and skip the override — title-matching
+    # can find different papers that share a distinctive suffix (e.g. Harvey-Liu-Zhu
+    # 2016 "...and the Cross-Section of Expected Returns" vs Pinchuk 2023 "Labor
+    # Income Risk and the Cross-Section of Expected Returns", 70% word overlap).
+    if title and not arxiv_id:
+        has_doi = bool(ref.get("doi") or result.get("doi"))
+        doi_resolved_pdf = (bool(result.get("pdf_url"))
+                            and has_doi
+                            and any(s in ("crossref", "unpaywall") for s in result["sources"]))
+
         arxiv = search_arxiv(title)
         if arxiv:
-            if arxiv.get("pdf_url"):
-                result["pdf_url"] = arxiv["pdf_url"]
-            if arxiv.get("abstract") and not result.get("abstract"):
-                result["abstract"] = arxiv["abstract"]
-            if arxiv.get("url") and not result.get("url"):
-                result["url"] = arxiv["url"]
-            if "arxiv" not in result["sources"]:
-                result["sources"].append("arxiv")
-            _log_step(bib_key, "arXiv search", True,
-                      f"id={arxiv.get('arxiv_id')} pdf={arxiv.get('pdf_url')}")
+            current_pdf = (result.get("pdf_url") or "").lower()
+            current_url = (result.get("url") or "").lower()
+            # Year-mismatch guard: arXiv title-search returns a different paper for
+            # short generic titles shared across decades (e.g. bib "Long short-term
+            # memory" / 1997 → arXiv 1602.03032 "LSTM: A Search Space Odyssey" / 2016).
+            # The arXiv id encodes the submission year — if it's wildly off from the
+            # bib year, drop the match entirely rather than override.
+            ax_year = _arxiv_year(arxiv.get("arxiv_id"))
+            year_ok = _years_compatible(year, ax_year)
+            if not year_ok:
+                logger.info("[%s] Rejecting arXiv match — year mismatch: bib=%s arxiv=%s id=%s",
+                            bib_key, year, ax_year, arxiv.get("arxiv_id"))
+                _log_step(bib_key, "arXiv search", False,
+                          f"rejected year mismatch (bib={year}, arxiv={ax_year})")
+            else:
+                if arxiv.get("pdf_url") and "arxiv.org" not in current_pdf and not doi_resolved_pdf:
+                    if current_pdf:
+                        logger.info("[%s] Overriding pdf_url (%s) with arXiv preprint (%s)",
+                                    bib_key, result.get("pdf_url"), arxiv["pdf_url"])
+                    result["pdf_url"] = arxiv["pdf_url"]
+                elif doi_resolved_pdf:
+                    logger.debug("[%s] Skipping arXiv pdf_url override — DOI-based PDF already present", bib_key)
+                if arxiv.get("abstract") and not result.get("abstract"):
+                    result["abstract"] = arxiv["abstract"]
+                # URL override also respects DOI-resolved URLs
+                if arxiv.get("url") and ("arxiv.org" not in current_url) and not doi_resolved_pdf:
+                    result["url"] = arxiv["url"]
+                if "arxiv" not in result["sources"]:
+                    result["sources"].append("arxiv")
+                _log_step(bib_key, "arXiv search", True,
+                          f"id={arxiv.get('arxiv_id')} pdf={arxiv.get('pdf_url')}")
         else:
             _log_step(bib_key, "arXiv search", False)
 
@@ -187,8 +336,47 @@ def process_reference(ref):
         _log_step(bib_key, "Wikipedia", wiki is not None,
                   f"page={wiki.get('wiki_title')} url={wiki.get('url')}" if wiki else "")
 
-    # Step 4: Google Scholar fallback (when no abstract AND no PDF found yet)
-    if not result.get("abstract") and not result.get("pdf_url") and title:
+    # Step 4: Google Custom Search (cheap, API-based fallback).
+    # Fires when there's no PDF yet OR when the current pdf_url is on a known-fragile
+    # publisher domain (Wiley / SSRN / econstor / ScienceDirect / Springer / JSTOR).
+    # Those publishers claim OA via Unpaywall but bot-block anonymous downloads —
+    # a university mirror / author homepage is almost always downloadable.
+    current_is_fragile = _is_fragile_pdf(result.get("pdf_url"))
+    if title and (not result.get("pdf_url") or current_is_fragile):
+        # Extract a doc identifier (Press Release 2024-137, SR 11-7, etc.) from the bib's
+        # number/note fields — strong fallback when the user-composed title doesn't index well.
+        from api_clients.google_search import _extract_doc_id
+        all_fields = ref.get("all_fields") or {}
+        doc_id = _extract_doc_id(
+            number_field=all_fields.get("number"),
+            note_field=all_fields.get("note"),
+            title=title,
+        )
+        gs = lookup_google_search(title, doi=result.get("doi"),
+                                   authors=result.get("authors") or ref.get("authors"),
+                                   doc_id=doc_id)
+        if gs:
+            result["sources"].append("google_search")
+            result["abstract"] = result["abstract"] or gs.get("abstract")
+            gs_pdf = gs.get("pdf_url")
+            # Override fragile publisher URL with a non-fragile Google find.
+            if gs_pdf and not result.get("pdf_url"):
+                result["pdf_url"] = gs_pdf
+            elif gs_pdf and current_is_fragile and not _is_fragile_pdf(gs_pdf):
+                logger.info("[%s] Overriding fragile pdf_url (%s) with Google-found alt (%s)",
+                            bib_key, result["pdf_url"], gs_pdf)
+                result["pdf_url"] = gs_pdf
+            if not result["url"] and gs.get("url"):
+                result["url"] = gs["url"]
+        _log_step(bib_key, "GoogleSearch", gs is not None,
+                  f"url={gs.get('url')} pdf={gs.get('pdf_url')}" if gs else "")
+
+    # Step 5: Google Scholar (LAST RESORT — scraping, rate-limited, bot-detected)
+    # Only run if nothing else found ANY useful signal (no abstract, no pdf_url, no url).
+    if (not result.get("abstract")
+            and not result.get("pdf_url")
+            and not result.get("url")
+            and title):
         sch = lookup_scholarly(title)
         if sch:
             result["sources"].append("scholarly")
@@ -200,18 +388,77 @@ def process_reference(ref):
         _log_step(bib_key, "GoogleScholar", sch is not None,
                   f"url={sch.get('url')} pdf={sch.get('pdf_url')}" if sch else "")
 
-    # Step 5: Google Custom Search (last resort)
-    if not result.get("abstract") and not result.get("pdf_url") and title:
-        gs = lookup_google_search(title, doi=result.get("doi"))
-        if gs:
-            result["sources"].append("google_search")
-            result["abstract"] = result["abstract"] or gs.get("abstract")
-            if not result["pdf_url"] and gs.get("pdf_url"):
-                result["pdf_url"] = gs["pdf_url"]
-            if not result["url"] and gs.get("url"):
-                result["url"] = gs["url"]
-        _log_step(bib_key, "GoogleSearch", gs is not None,
-                  f"url={gs.get('url')} pdf={gs.get('pdf_url')}" if gs else "")
+    # Step 6: arXiv preprint title search (FINAL fallback)
+    # If nothing has worked so far, try arXiv one more time by title — the paper may
+    # have a preprint twin even though every other source missed it. This runs even
+    # if Step 2.5 already ran (arXiv may have been transiently unavailable then).
+    if (not result.get("abstract")
+            and not result.get("pdf_url")
+            and not result.get("url")
+            and title):
+        arxiv = search_arxiv(title)
+        if arxiv:
+            ax_year = _arxiv_year(arxiv.get("arxiv_id"))
+            if not _years_compatible(year, ax_year):
+                logger.info("[%s] Rejecting arXiv preprint — year mismatch: bib=%s arxiv=%s id=%s",
+                            bib_key, year, ax_year, arxiv.get("arxiv_id"))
+                _log_step(bib_key, "arXiv preprint", False,
+                          f"rejected year mismatch (bib={year}, arxiv={ax_year})")
+            else:
+                if "arxiv_preprint" not in result["sources"]:
+                    result["sources"].append("arxiv_preprint")
+                if arxiv.get("pdf_url"):
+                    result["pdf_url"] = arxiv["pdf_url"]
+                if arxiv.get("abstract"):
+                    result["abstract"] = arxiv["abstract"]
+                if arxiv.get("url") and not result.get("url"):
+                    result["url"] = arxiv["url"]
+                _log_step(bib_key, "arXiv preprint", True,
+                          f"id={arxiv.get('arxiv_id')} pdf={arxiv.get('pdf_url')}")
+        else:
+            _log_step(bib_key, "arXiv preprint", False)
+
+    # metadata_only mode: the bib entry's own URL was successfully downloaded,
+    # so it is the authoritative content source. Restore URL fields, clear the
+    # abstract, and restore identity fields (title/authors/year/journal) from the
+    # bib — APIs occasionally return a different paper for fuzzy title matches
+    # (e.g. "Reinforcement Learning for Trade Execution with Market Impact"
+    # matched the older Nevmyvaka-Feng-Kearns "...for Optimized Trade Execution"
+    # paper on OpenAlex, replacing Cheridito-Weiss with the wrong authors).
+    # API-derived enrichment kept: citation_count, DOI (when bib lacked one), sources.
+    if metadata_only:
+        bib_url = ref.get("url")
+        # Apply the same landing-page → direct-content normalization that
+        # pre_download_bib_url uses, so result.pdf_url points at the actual
+        # downloaded file (arxiv.org/abs/X became arxiv.org/pdf/X on download).
+        from file_downloader import _normalize_bib_url
+        normalized = _normalize_bib_url(bib_url) if bib_url else bib_url
+        is_bib_pdf = normalized and (
+            normalized.lower().endswith(".pdf") or "/pdf/" in normalized.lower()
+        )
+        if is_bib_pdf:
+            result["pdf_url"] = normalized
+            result["url"] = bib_url  # keep human-readable original (abs page) for the UI
+        else:
+            result["url"] = bib_url
+            result["pdf_url"] = None
+        result["abstract"] = None
+        # Restore identity fields from the bib (canonical when bib URL works).
+        if title:
+            result["title"] = title
+        bib_authors = ref.get("authors")
+        if bib_authors:
+            result["authors"] = (bib_authors if isinstance(bib_authors, list)
+                                 else [bib_authors])
+        if year:
+            result["year"] = year
+        if ref.get("journal"):
+            result["journal"] = ref.get("journal")
+        # Tag the reference as sourced from the bib entry's URL — put "URL" FIRST
+        # in sources so the UI surfaces it prominently as the primary tag.
+        result["sources"] = ["URL"] + [s for s in result["sources"] if s != "URL"]
+        logger.info("[%s] metadata_only: tagged as URL (%s), restored bib identity fields, cleared abstract",
+                    bib_key, "PDF" if is_bib_pdf else "HTML")
 
     # Determine final status
     if result["pdf_url"]:
@@ -237,14 +484,15 @@ def _reset_api_blocks():
     logger.info("API block flags reset for new session")
 
 
-def process_all(refs, callback=None, max_workers=None):
+def process_all(refs, callback=None, max_workers=None, process_fn=None):
     _reset_api_blocks()
     workers = max_workers or MAX_WORKERS
+    fn = process_fn or process_reference
     results = []
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         future_to_idx = {
-            executor.submit(process_reference, ref): i
+            executor.submit(fn, ref): i
             for i, ref in enumerate(refs)
         }
         for future in as_completed(future_to_idx):

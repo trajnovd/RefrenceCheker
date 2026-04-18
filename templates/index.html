@@ -66,62 +66,108 @@
       <p id="no-projects-msg" class="no-results-msg" style="display:none;">No projects yet. Create one to get started.</p>
     </section>
 
-    <!-- ========== View 0.5: Project Dashboard ========== -->
+    <!-- ========== View 0.5: Project Dashboard (v5) ========== -->
     <section id="view-dashboard" class="view dashboard-section" aria-label="Project dashboard">
 
-      <div class="breadcrumb">
+      <div class="dash-header">
         <button type="button" id="dash-back-btn" class="btn-link">&larr; All Projects</button>
+        <h2 class="dash-header__title" id="dash-project-name"></h2>
       </div>
 
-      <h2 class="dashboard__title" id="dash-project-name"></h2>
-
-      <!-- Actions row -->
-      <div class="dashboard__actions">
-        <div class="dashboard__action-card">
-          <h3>References (.bib)</h3>
-          <p class="dashboard__action-desc" id="dash-bib-status">No .bib file uploaded yet</p>
-          <div class="dashboard__action-btns">
-            <label class="btn btn--primary btn--small" id="dash-upload-bib-label">
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-              Upload .bib
-              <input type="file" id="dash-bib-input" class="file-input" accept=".bib">
-            </label>
-            <button type="button" id="dash-view-refs-btn" class="btn btn--outline btn--small" disabled>View References</button>
-          </div>
+      <!-- ===== Status block (hero) ===== -->
+      <div class="dash-status" id="dash-status">
+        <div class="dash-status__row">
+          <span class="dash-status__label">References</span>
+          <div class="dash-status__bar"><div id="dash-bar-refs" class="dash-status__fill"></div></div>
+          <span class="dash-status__detail" id="dash-detail-refs">--</span>
         </div>
-
-        <div class="dashboard__action-card">
-          <h3>LaTeX Document (.tex)</h3>
-          <p class="dashboard__action-desc" id="dash-tex-status">No .tex file uploaded yet</p>
-          <div class="dashboard__action-btns">
-            <label class="btn btn--primary btn--small" id="dash-upload-tex-label">
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-              Upload .tex
-              <input type="file" id="dash-tex-input" class="file-input" accept=".tex">
-            </label>
-            <button type="button" id="dash-review-btn" class="btn btn--outline btn--small" disabled>Citation Review</button>
-          </div>
+        <div class="dash-status__row">
+          <span class="dash-status__label">Reference .md</span>
+          <div class="dash-status__bar"><div id="dash-bar-md" class="dash-status__fill"></div></div>
+          <span class="dash-status__detail" id="dash-detail-md">--</span>
         </div>
-
-        <div class="dashboard__action-card">
-          <h3>Export</h3>
-          <p class="dashboard__action-desc">Download results as CSV or PDF report</p>
-          <div class="dashboard__action-btns">
-            <button type="button" id="dash-csv-btn" class="btn btn--outline btn--small" disabled>Download CSV</button>
-            <button type="button" id="dash-pdf-btn" class="btn btn--outline btn--small" disabled>Download PDF</button>
-          </div>
+        <div class="dash-status__row">
+          <span class="dash-status__label">Citations</span>
+          <div class="dash-status__bar"><div id="dash-bar-cites" class="dash-status__fill"></div></div>
+          <span class="dash-status__detail" id="dash-detail-cites">--</span>
+        </div>
+        <div class="dash-status__row">
+          <span class="dash-status__label">Claim check</span>
+          <div class="dash-status__bar"><div id="dash-bar-check" class="dash-status__fill"></div></div>
+          <span class="dash-status__detail" id="dash-detail-check">--</span>
+        </div>
+        <div class="dash-status__ctas">
+          <button type="button" id="dash-review-btn" class="btn btn--primary btn--small" disabled>Resume Citation Review</button>
+          <button type="button" id="dash-verify-btn" class="btn btn--primary btn--small" disabled>Open Verification Table</button>
+          <button type="button" id="dash-validity-report-btn" class="btn btn--primary btn--small" disabled title="Generate an actionable HTML report of all problematic citations + downloadable references bundle">Validity Report</button>
+          <button type="button" id="dash-download-refs-btn" class="btn btn--outline btn--small" disabled title="Download a ZIP of all referenced source files (PDF / HTML / Markdown) for problematic and partial citations">Download References (.zip)</button>
         </div>
       </div>
 
-      <!-- Reference statistics -->
-      <div id="dash-stats" class="dashboard__stats" style="display:none;">
-        <h3>Reference Statistics</h3>
-        <div class="stats-bar" role="region" aria-label="Reference statistics">
-          <div class="stat-item stat-item--total">Total: <span id="dash-stat-total">0</span></div>
-          <div class="stat-item stat-item--pdf">PDF Found: <span id="dash-stat-pdf">0</span></div>
-          <div class="stat-item stat-item--abstract">Abstract Only: <span id="dash-stat-abstract">0</span></div>
-          <div class="stat-item stat-item--webpage">Web Page: <span id="dash-stat-webpage">0</span></div>
-          <div class="stat-item stat-item--notfound">Not Found: <span id="dash-stat-notfound">0</span></div>
+      <!-- ===== Issues + Recently verified (side by side) ===== -->
+      <div class="dash-panels">
+        <div class="dash-panel" id="dash-issues">
+          <h3 class="dash-panel__title">Issues <span id="dash-issues-count" class="dash-panel__count"></span></h3>
+          <div id="dash-issues-list" class="dash-panel__list"><p class="dash-panel__empty">No issues.</p></div>
+          <a id="dash-issues-open" class="dash-panel__link" style="display:none;">Open in Review &rarr;</a>
+        </div>
+        <div class="dash-panel" id="dash-verified">
+          <h3 class="dash-panel__title">Recently verified</h3>
+          <div id="dash-verified-list" class="dash-panel__list"><p class="dash-panel__empty">No verdicts yet.</p></div>
+          <a id="dash-verified-open" class="dash-panel__link" style="display:none;">Show all &rarr;</a>
+        </div>
+      </div>
+
+      <!-- ===== Breakdowns (side by side) ===== -->
+      <div class="dash-panels">
+        <div class="dash-panel">
+          <h3 class="dash-panel__title">Reference breakdown</h3>
+          <div id="dash-ref-breakdown" class="dash-breakdown"></div>
+        </div>
+        <div class="dash-panel">
+          <h3 class="dash-panel__title">Citation breakdown</h3>
+          <div id="dash-cite-breakdown" class="dash-breakdown"></div>
+        </div>
+      </div>
+
+      <!-- ===== Activity log ===== -->
+      <div class="dash-panel dash-panel--wide" id="dash-activity-panel" style="display:none;">
+        <h3 class="dash-panel__title">Activity</h3>
+        <div id="dash-activity-list" class="dash-panel__list"></div>
+      </div>
+
+      <!-- ===== Operations strip ===== -->
+      <div class="dash-ops">
+        <label class="btn btn--outline btn--small" id="dash-upload-bib-label" title="Upload .bib">
+          Upload .bib
+          <input type="file" id="dash-bib-input" class="file-input" accept=".bib">
+        </label>
+        <label class="btn btn--outline btn--small" id="dash-upload-tex-label" title="Upload .tex">
+          Upload .tex
+          <input type="file" id="dash-tex-input" class="file-input" accept=".tex">
+        </label>
+        <button type="button" id="dash-build-md-btn" class="btn btn--outline btn--small" disabled title="Rebuild all .md from current sources">Rebuild .md</button>
+        <button type="button" id="dash-check-refs-match-btn" class="btn btn--outline btn--small" disabled title="LLM-verify that downloaded text matches the bib title + authors">Check Matches</button>
+        <button type="button" id="dash-view-refs-btn" class="btn btn--outline btn--small" disabled>View References</button>
+        <button type="button" id="dash-csv-btn" class="btn btn--outline btn--small" disabled>CSV</button>
+        <button type="button" id="dash-pdf-btn" class="btn btn--outline btn--small" disabled>PDF</button>
+      </div>
+
+      <!-- md rebuild progress (shown inline when running) -->
+      <div id="dash-md-progress" class="md-progress" style="display:none; margin:0.5rem 1.5rem;">
+        <div class="progress-bar"><div id="dash-md-progress-fill" class="progress-bar__fill progress-bar__fill--active" style="width:0%"></div></div>
+        <div class="progress-label" style="margin-top:0.35rem; font-size:0.85rem;">
+          <span id="dash-md-progress-count">0 / 0</span>
+          <span id="dash-md-progress-current" style="opacity:0.75;"></span>
+        </div>
+      </div>
+
+      <!-- ref-match progress (shown inline when running) -->
+      <div id="dash-rm-progress" class="md-progress" style="display:none; margin:0.5rem 1.5rem;">
+        <div class="progress-bar"><div id="dash-rm-progress-fill" class="progress-bar__fill progress-bar__fill--active" style="width:0%"></div></div>
+        <div class="progress-label" style="margin-top:0.35rem; font-size:0.85rem;">
+          <span id="dash-rm-progress-count">0 / 0</span>
+          <span id="dash-rm-progress-current" style="opacity:0.75;"></span>
         </div>
       </div>
 
@@ -266,7 +312,26 @@
     <!-- ========== View 4: Citation Review ========== -->
     <section id="view-review" class="view review-section" aria-label="Citation context review">
       <div class="review-panels">
-        <!-- ===== LEFT COLUMN ===== -->
+        <!-- ===== LEFTMOST COLUMN: References list ===== -->
+        <aside class="review-refs" aria-label="References list">
+          <div class="review-refs__header">
+            <div class="review-refs__title">References</div>
+            <div class="review-refs__controls">
+              <input type="search" id="review-refs-search" placeholder="Filter..." class="review-refs__search">
+              <select id="review-refs-sort" class="review-refs__sort" title="Sort references">
+                <option value="doc">Doc order</option>
+                <option value="worst">Worst first</option>
+                <option value="key">Alphabetical</option>
+              </select>
+            </div>
+            <div class="review-refs__filters">
+              <label class="review-refs__chip"><input type="checkbox" id="review-refs-issues-only"> Issues only</label>
+            </div>
+          </div>
+          <div id="review-refs-list" class="review-refs__list"></div>
+        </aside>
+
+        <!-- ===== MIDDLE COLUMN: LaTeX editor (pristine) ===== -->
         <div class="review-left">
           <!-- Left header: nav bar -->
           <div class="review-left__header">
@@ -274,18 +339,40 @@
             <span id="review-tex-filename" class="review-left__filename"></span>
             <button type="button" id="review-save-tex-btn" class="btn btn--outline btn--small" title="Save changes">Save</button>
             <a id="review-download-tex-btn" class="btn btn--outline btn--small" title="Download .tex file" download>Download</a>
+            <button type="button" id="review-check-all-btn" class="btn btn--outline btn--small" title="Run LLM check on every citation" disabled>Check All</button>
+            <button type="button" id="review-stop-check-btn" class="btn btn--outline btn--small" title="Stop the running batch" style="display:none;">Stop</button>
+            <span id="review-check-status" class="review-left__status"></span>
+            <a id="review-open-verify-btn" class="btn btn--outline btn--small" title="Open the verification table">Verify Table</a>
             <div class="review-left__nav">
               <button type="button" id="review-prev-btn" class="btn btn--outline btn--small">&lt; Prev</button>
               <span id="review-counter" class="review-left__counter">0 / 0</span>
               <button type="button" id="review-next-btn" class="btn btn--outline btn--small">Next &gt;</button>
             </div>
           </div>
-          <!-- LaTeX editor (CodeMirror 6) -->
+          <!-- LaTeX editor (CodeMirror 6) — pristine, no decorations injected -->
           <div id="review-cm-editor" class="review-cm-editor"></div>
         </div>
 
-        <!-- ===== RIGHT COLUMN ===== -->
+        <!-- ===== RIGHT COLUMN: Verdict header + reference content ===== -->
         <div class="review-right">
+          <!-- Verdict header (top of right panel) -->
+          <div id="review-verdict" class="review-verdict" style="display:none;">
+            <div class="review-verdict__top">
+              <span id="review-verdict-badge" class="review-verdict__badge"></span>
+              <span id="review-verdict-conf" class="review-verdict__conf"></span>
+              <button type="button" id="review-override-btn" class="btn btn--outline btn--small" title="Manually set this verdict">Override</button>
+              <button type="button" id="review-recheck-btn" class="btn btn--outline btn--small">Recheck</button>
+            </div>
+            <div id="review-verdict-explanation" class="review-verdict__explanation"></div>
+            <div id="review-verdict-evidence" class="review-verdict__evidence"></div>
+          </div>
+          <div id="review-verdict-empty" class="review-verdict review-verdict--empty" style="display:none;">
+            <button type="button" id="review-check-one-btn" class="btn btn--primary btn--small">Check this citation</button>
+            <span class="review-verdict__hint">Not yet checked.</span>
+          </div>
+          <!-- Reference identity match status + manual override (sits with the claim-support
+               header at the top of the right panel — same conceptual area: "is this verdict trustworthy?") -->
+          <div id="review-ref-match" class="review-ref-match" style="display:none;"></div>
           <!-- Right header: reference info + actions -->
           <div class="review-right__header">
             <div class="review-refbar__top">
@@ -294,23 +381,34 @@
                 <span class="review-refbar__title" id="review-ref-title"></span>
               </div>
               <div class="review-right__actions">
-                <button type="button" id="review-set-link-btn" class="btn btn--outline btn--small" title="Set link manually">Set Link</button>
+                <button type="button" id="review-set-link-btn" class="btn btn--outline btn--small" title="Replace source with a URL (PDF or web page)">Set Link</button>
+                <button type="button" id="review-upload-pdf-btn" class="btn btn--outline btn--small" title="Upload a PDF file (for sites that block scraping)">Upload PDF</button>
+                <input type="file" id="review-upload-pdf-input" accept="application/pdf,.pdf" style="display:none;">
+                <button type="button" id="review-paste-content-btn" class="btn btn--outline btn--small" title="Paste page content as text">Paste Content</button>
                 <button type="button" id="review-refresh-btn" class="btn btn--outline btn--small" title="Refresh reference">Refresh</button>
+                <button type="button" id="review-add-ref-btn" class="btn btn--primary btn--small" title="Add bibliography entry for this citation" style="display:none;">Add Reference</button>
               </div>
             </div>
             <div class="review-refbar__details" id="review-ref-meta"></div>
           </div>
+          <!-- Broken-bib-URL warning (shown when status === bib_url_unreachable) -->
+          <div id="review-broken-url-warning" class="review-broken-url-warning" style="display:none;"></div>
+          <!-- Download-failure warning (shown when pdf_url exists but local file is missing) -->
+          <div id="review-dl-warning" class="review-dl-warning" style="display:none;"></div>
           <!-- Tab bar -->
           <div class="review-ref__tabs">
             <button type="button" class="review-tab" id="review-tab-pdf" data-tab="pdf">PDF</button>
             <button type="button" class="review-tab" id="review-tab-html" data-tab="html">HTML</button>
             <button type="button" class="review-tab" id="review-tab-abstract" data-tab="abstract">Abstract</button>
+            <button type="button" class="review-tab" id="review-tab-md" data-tab="md" title="The consolidated reference markdown — what claim-checking reads">Markdown</button>
             <button type="button" class="review-tab" id="review-tab-bibtex" data-tab="bibtex">BibTeX</button>
           </div>
           <!-- Content area -->
           <div class="review-ref__content" id="review-ref-content">
             <iframe id="review-iframe" class="review-ref__iframe" style="display:none;"></iframe>
+            <div id="review-pdf-footer" class="review-pdf-footer" style="display:none;"></div>
             <div id="review-abstract-text" class="review-ref__abstract" style="display:none;"></div>
+            <pre id="review-md-text" class="review-ref__bibtex" style="display:none;"></pre>
             <pre id="review-bibtex-text" class="review-ref__bibtex" style="display:none;"></pre>
             <div id="review-no-content" class="review-ref__empty" style="display:none;">No content available for this reference.</div>
           </div>
@@ -318,7 +416,88 @@
       </div>
     </section>
 
+    <!-- ========== View 5: Verification Table ========== -->
+    <section id="view-verify" class="view verify-section" aria-label="Citation verification table">
+      <div class="verify-toolbar">
+        <button type="button" id="verify-back-btn" class="btn-link">&larr; Back</button>
+        <button type="button" id="verify-run-all-btn" class="btn btn--primary btn--small" disabled>Run All</button>
+        <button type="button" id="verify-stop-btn" class="btn btn--outline btn--small" style="display:none;">Stop</button>
+        <span id="verify-progress-text" class="verify-toolbar__progress">0 / 0 checked</span>
+        <div class="verify-toolbar__progressbar"><div id="verify-progress-fill" class="verify-toolbar__progressfill"></div></div>
+        <span id="verify-cost-est" class="verify-toolbar__cost"></span>
+        <div class="verify-toolbar__filters" id="verify-filters">
+          <label><input type="checkbox" data-filter="supported" checked> ✓ Supported</label>
+          <label><input type="checkbox" data-filter="partial" checked> ⚠ Partial</label>
+          <label><input type="checkbox" data-filter="not_supported" checked> ✗ Not supported</label>
+          <label><input type="checkbox" data-filter="unknown" checked> ? Unknown</label>
+          <label><input type="checkbox" data-filter="unchecked" checked> Not yet checked</label>
+        </div>
+        <input type="search" id="verify-search" class="verify-toolbar__search" placeholder="Search key, sentence, reference...">
+        <button type="button" id="verify-export-csv-btn" class="btn btn--outline btn--small">Export CSV</button>
+        <a id="verify-back-review-btn" class="btn btn--outline btn--small">Back to Review</a>
+      </div>
+
+      <div class="verify-table-wrap">
+        <table id="verify-table" class="verify-table">
+          <thead>
+            <tr>
+              <th data-sort="index" style="width:40px;">#</th>
+              <th data-sort="line" style="width:60px;">Line</th>
+              <th data-sort="key" style="width:140px;">Key</th>
+              <th>Claim sentence</th>
+              <th style="width:200px;">Reference</th>
+              <th data-sort="verdict" style="width:130px;">Verdict</th>
+              <th data-sort="confidence" style="width:80px;">Conf.</th>
+              <th>Evidence</th>
+              <th style="width:90px;">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="verify-tbody"></tbody>
+        </table>
+      </div>
+    </section>
+
   </main>
+
+  <!-- ========== Add Reference modal (v4) ========== -->
+  <div id="add-ref-modal" class="modal" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="add-ref-title-label">
+    <div class="modal__overlay"></div>
+    <div class="modal__panel">
+      <h3 id="add-ref-title-label" class="modal__title">Add Reference: <code id="add-ref-key-label"></code></h3>
+      <p class="modal__desc">Paste a BibTeX entry for this citation. The entry's key will be replaced with <code id="add-ref-key-label-2"></code> so it lines up with the citation in your <code>.tex</code>.</p>
+      <form id="add-ref-form" class="modal__form" onsubmit="return false;">
+        <label>BibTeX entry <span class="modal__req">*</span>
+          <textarea id="add-ref-bib-text" rows="10" spellcheck="false"
+            placeholder="@article{anyKey,&#10;  title = {Paper title},&#10;  author = {Smith, J. and Jones, K.},&#10;  year = {2024},&#10;  doi = {10.1234/abcd},&#10;}"></textarea>
+        </label>
+      </form>
+      <div class="modal__error" id="add-ref-error"></div>
+      <div class="modal__actions">
+        <button type="button" id="add-ref-cancel" class="btn btn--outline btn--small">Cancel</button>
+        <button type="button" id="add-ref-submit" class="btn btn--primary btn--small">Add &amp; Look Up</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== Paste Content modal ========== -->
+  <div id="paste-content-modal" class="modal" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="paste-content-title-label">
+    <div class="modal__overlay"></div>
+    <div class="modal__panel">
+      <h3 id="paste-content-title-label" class="modal__title">Paste Content: <code id="paste-content-key-label"></code></h3>
+      <p class="modal__desc">Paste the page text or markdown for this reference. This becomes the body of the reference's <code>.md</code> and is what claim-checking reads. Use this when the page can't be auto-downloaded (Cloudflare, paywalls, JS-only sites).</p>
+      <form id="paste-content-form" class="modal__form" onsubmit="return false;">
+        <label>Content <span class="modal__req">*</span>
+          <textarea id="paste-content-text" rows="14" spellcheck="false"
+            placeholder="Paste the article body or markdown here..."></textarea>
+        </label>
+      </form>
+      <div class="modal__error" id="paste-content-error"></div>
+      <div class="modal__actions">
+        <button type="button" id="paste-content-cancel" class="btn btn--outline btn--small">Cancel</button>
+        <button type="button" id="paste-content-submit" class="btn btn--primary btn--small">Save</button>
+      </div>
+    </div>
+  </div>
 
   <script src="{{ url_for('static', filename='js/app.js') }}"></script>
   <script type="module" src="{{ url_for('static', filename='js/cm-setup.js') }}"></script>

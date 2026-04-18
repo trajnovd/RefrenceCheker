@@ -4,3 +4,7 @@ beautifulsoup4==4.12.3
 fpdf2==2.8.3
 pytest==8.3.4
 bibtexparser>=2.0.0b3
+pymupdf4llm>=0.0.17
+# docling is optional; install only if PDF_CONVERTER=docling
+# docling>=2.0.0
+openai>=1.0

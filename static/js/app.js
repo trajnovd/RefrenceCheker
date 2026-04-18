@@ -14,6 +14,7 @@
   let totalRefs = 0;
   let processedCount = 0;
   let allResults = [];
+  let allParsedRefs = [];  // parsed .bib entries — used to surface raw_bib even when result is missing or keys mismatch
   let eventSource = null;
 
   // Review state
@@ -24,7 +25,7 @@
   /* ----------------------------------------------------------
      DOM references (set in init)
      ---------------------------------------------------------- */
-  let projectsView, dashboardView, uploadView, processingView, resultsView, reviewView;
+  let projectsView, dashboardView, uploadView, processingView, resultsView, reviewView, verifyView;
   let projectsGrid, noProjectsMsg, projectNameInput, createProjectBtn;
   let dropZone, fileInput, fileNameDisplay, uploadBtn, chooseBtn;
   let uploadError, uploadWarning, uploadProjectName;
@@ -38,7 +39,7 @@
   let reviewRefKey, reviewRefTitle, reviewRefMeta;
   let reviewRefContent, reviewIframe, reviewAbstractText, reviewBibtexText, reviewNoContent;
   let reviewCounter, reviewTexFilename;
-  let reviewTabPdf, reviewTabHtml, reviewTabAbstract, reviewTabBibtex;
+  let reviewTabPdf, reviewTabHtml, reviewTabAbstract, reviewTabBibtex, reviewTabMd;
   let reviewSetLinkBtn, reviewRefreshBtn;
 
   /* ----------------------------------------------------------
@@ -76,15 +77,17 @@
     processingView.classList.remove('view--active');
     resultsView.classList.remove('view--active');
     reviewView.classList.remove('view--active');
+    if (verifyView) verifyView.classList.remove('view--active');
     if (name === 'projects') projectsView.classList.add('view--active');
     if (name === 'dashboard') dashboardView.classList.add('view--active');
     if (name === 'upload') uploadView.classList.add('view--active');
     if (name === 'processing') processingView.classList.add('view--active');
     if (name === 'results') resultsView.classList.add('view--active');
     if (name === 'review') reviewView.classList.add('view--active');
-    // Hide header in review mode to maximize space
+    if (name === 'verify' && verifyView) verifyView.classList.add('view--active');
+    // Hide header in review/verify mode to maximize space (both use full-screen layouts)
     var header = document.getElementById('app-header');
-    header.style.display = (name === 'review') ? 'none' : '';
+    header.style.display = (name === 'review' || name === 'verify') ? 'none' : '';
   }
 
   /* ----------------------------------------------------------
@@ -98,6 +101,8 @@
         return '<span class="result-card__status-icon result-card__status-icon--found_abstract" aria-label="Abstract only">' + SVG.alertTriangle + '</span>';
       case 'found_web_page':
         return '<span class="result-card__status-icon result-card__status-icon--found_web_page" aria-label="Web page found">' + SVG.externalLink + '</span>';
+      case 'bib_url_unreachable':
+        return '<span class="result-card__status-icon result-card__status-icon--bib_url_unreachable" aria-label="Broken URL">' + SVG.xCircle + '</span>';
       case 'not_found':
         return '<span class="result-card__status-icon result-card__status-icon--not_found" aria-label="Not found">' + SVG.xCircle + '</span>';
       default:
@@ -110,6 +115,7 @@
       case 'found_pdf': return 'PDF Available';
       case 'found_abstract': return 'Abstract Only';
       case 'found_web_page': return 'Web Page';
+      case 'bib_url_unreachable': return 'Broken URL — fix the citation';
       case 'not_found': return 'Not Found';
       default: return 'Error';
     }
@@ -122,6 +128,7 @@
       case 'found_pdf': icon = SVG.checkCircle; break;
       case 'found_abstract': icon = SVG.alertTriangle; break;
       case 'found_web_page': icon = SVG.externalLink; break;
+      case 'bib_url_unreachable': icon = SVG.xCircle; break;
       default: icon = SVG.xCircle; break;
     }
     return '<span class="' + cssClass + '">' + icon + ' ' + escapeHtml(statusLabel(status)) + '</span>';
@@ -225,6 +232,7 @@
           }
           return r;
         });
+        allParsedRefs = proj.parsed_refs || [];
         showDashboard(proj);
       });
   }
@@ -232,59 +240,322 @@
   function showDashboard(proj) {
     el('dash-project-name').textContent = proj.name;
 
-    // Bib status
-    var bibStatus = el('dash-bib-status');
-    var viewRefsBtn = el('dash-view-refs-btn');
-    var hasResults = proj.results && proj.results.length > 0;
-    if (proj.bib_filename && hasResults) {
-      bibStatus.textContent = proj.bib_filename + ' — ' + proj.total + ' references (' + proj.status + ')';
-      viewRefsBtn.disabled = false;
-    } else if (proj.bib_filename) {
-      bibStatus.textContent = proj.bib_filename + ' — ' + (proj.status || 'uploaded');
-      viewRefsBtn.disabled = true;
-    } else {
-      bibStatus.textContent = 'No .bib file uploaded yet';
-      viewRefsBtn.disabled = true;
-    }
+    var results = proj.results || [];
+    var parsedRefs = proj.parsed_refs || [];
+    var citations = proj.citations || [];
+    var checks = proj.claim_checks || {};
+    var hasResults = results.length > 0;
+    var hasTex = !!proj.tex_filename;
+    var hasCitations = citations.length > 0;
 
-    // Tex status
-    var texStatus = el('dash-tex-status');
+    // ---- Status block ----
+    // References
+    var refTotal = parsedRefs.length || results.length;
+    var refFound = results.filter(function (r) {
+      return r.status && r.status !== 'not_found'
+             && r.status !== 'insufficient_data'
+             && r.status !== 'bib_url_unreachable';
+    }).length;
+    var refMissing = refTotal - refFound;
+    _dashBar('dash-bar-refs', refFound, refTotal);
+    el('dash-detail-refs').textContent = refTotal > 0
+      ? (refFound + ' / ' + refTotal + ' found' + (refMissing > 0 ? ' (' + refMissing + ' missing)' : ''))
+      : 'No .bib uploaded';
+
+    // Reference .md
+    var mdCount = results.filter(function (r) { return r.files && r.files.md; }).length;
+    _dashBar('dash-bar-md', mdCount, results.length);
+    el('dash-detail-md').textContent = results.length > 0
+      ? (mdCount + ' / ' + results.length + ' built')
+      : '--';
+
+    // Citations
+    _dashBar('dash-bar-cites', hasCitations ? 1 : 0, 1);
+    el('dash-detail-cites').textContent = hasTex
+      ? (citations.length + ' parsed' + (proj.tex_filename ? ' (' + proj.tex_filename + ')' : ''))
+      : 'No .tex uploaded';
+
+    // Claim check
+    var checkedCount = 0, issueCount = 0;
+    var verdictBuckets = { supported: 0, partial: 0, not_supported: 0, unknown: 0, manual: 0, unchecked: 0 };
+    citations.forEach(function (c) {
+      var ck = c.claim_check_key;
+      var v = ck ? checks[ck] : null;
+      if (v) {
+        checkedCount++;
+        if (v.manual) verdictBuckets.manual++;
+        verdictBuckets[v.verdict] = (verdictBuckets[v.verdict] || 0) + 1;
+        if (v.verdict === 'not_supported' || v.verdict === 'partial') issueCount++;
+      } else {
+        verdictBuckets.unchecked++;
+      }
+    });
+    var checkPct = hasCitations ? checkedCount / citations.length : 0;
+    _dashBar('dash-bar-check', checkedCount, citations.length || 1,
+             issueCount > 0 ? 'warn' : null);
+    el('dash-detail-check').textContent = hasCitations
+      ? (checkedCount + ' / ' + citations.length + ' checked'
+         + (issueCount > 0 ? ' (' + issueCount + ' issues)' : ''))
+      : '--';
+
+    // CTAs
     var reviewBtn = el('dash-review-btn');
-    if (proj.tex_filename) {
-      var citCount = (proj.citations || []).length;
-      texStatus.textContent = proj.tex_filename + ' — ' + citCount + ' citations';
-      reviewBtn.disabled = false;
+    var verifyBtn = el('dash-verify-btn');
+    reviewBtn.disabled = !hasTex || !hasCitations;
+    verifyBtn.disabled = !hasCitations;
+
+    // ---- Issues panel ----
+    var issuesList = [];
+    // 1. not_supported / partial verdicts
+    citations.forEach(function (c, idx) {
+      var ck = c.claim_check_key;
+      var v = ck ? checks[ck] : null;
+      if (v && (v.verdict === 'not_supported' || v.verdict === 'partial')) {
+        issuesList.push({ badge: v.verdict === 'not_supported' ? '✗' : '⚠',
+                          cls: v.verdict, key: c.bib_key,
+                          reason: v.verdict === 'not_supported' ? 'not supported' : 'partial',
+                          idx: idx });
+      }
+    });
+    // 2. broken bib URL / identity mismatch / no .md content
+    var refsByKey = {};
+    results.forEach(function (r) { refsByKey[r.bib_key] = r; });
+    citations.forEach(function (c, idx) {
+      var ref = refsByKey[c.bib_key];
+      if (ref && ref.status === 'bib_url_unreachable') {
+        issuesList.push({ badge: '!', cls: 'not_supported', key: c.bib_key,
+                          reason: 'broken bib URL — fix the citation', idx: idx });
+      } else if (ref && ref.ref_match &&
+                 (ref.ref_match.verdict === 'not_matched' ||
+                  ref.ref_match.verdict === 'manual_not_matched')) {
+        // Identity mismatch — either the LLM flagged it, or the user manually
+        // marked it wrong (e.g. bib has hallucinated authors / wrong arXiv ID).
+        // Both deserve to stay visible in the issues list until resolved.
+        var reason = ref.ref_match.verdict === 'manual_not_matched'
+          ? 'citation flagged as wrong (manual) — fix the bib'
+          : 'downloaded text does not match title/authors';
+        issuesList.push({ badge: '!', cls: 'not_supported', key: c.bib_key,
+                          reason: reason, idx: idx });
+      } else if (ref && !(ref.files && ref.files.md)) {
+        issuesList.push({ badge: '?', cls: 'unknown', key: c.bib_key,
+                          reason: 'no .md content', idx: idx });
+      }
+      if (!ref) {
+        issuesList.push({ badge: '?', cls: 'unknown', key: c.bib_key,
+                          reason: 'no reference found', idx: idx });
+      }
+    });
+    // Dedupe by bib_key + reason, keep first occurrence
+    var seen = {};
+    issuesList = issuesList.filter(function (item) {
+      var k = item.key + '|' + item.reason;
+      if (seen[k]) return false;
+      seen[k] = true;
+      return true;
+    });
+    _renderDashIssues(issuesList.slice(0, 8));
+    var issuesCountEl = el('dash-issues-count');
+    if (issuesList.length > 0) {
+      issuesCountEl.textContent = issuesList.length;
+      issuesCountEl.style.display = '';
     } else {
-      texStatus.textContent = 'No .tex file uploaded yet';
-      reviewBtn.disabled = true;
+      issuesCountEl.style.display = 'none';
+    }
+    var issuesOpenEl = el('dash-issues-open');
+    if (issuesList.length > 0 && hasCitations) {
+      issuesOpenEl.style.display = '';
+      issuesOpenEl.onclick = function () { openVerifyView(); };
+    } else {
+      issuesOpenEl.style.display = 'none';
     }
 
-    // Export buttons
+    // ---- Recently verified panel ----
+    var verified = [];
+    citations.forEach(function (c, idx) {
+      var ck = c.claim_check_key;
+      var v = ck ? checks[ck] : null;
+      if (v && v.verdict === 'supported') {
+        verified.push({ key: c.bib_key, v: v, idx: idx });
+      }
+    });
+    verified.sort(function (a, b) {
+      return (b.v.checked_at || '').localeCompare(a.v.checked_at || '');
+    });
+    _renderDashVerified(verified.slice(0, 5));
+    var verifiedOpenEl = el('dash-verified-open');
+    if (verified.length > 5) {
+      verifiedOpenEl.style.display = '';
+      verifiedOpenEl.onclick = function () { openVerifyView(); };
+    } else {
+      verifiedOpenEl.style.display = 'none';
+    }
+
+    // ---- Reference breakdown ----
+    var refStats = { pdf: 0, abs: 0, web: 0, broken: 0, nf: 0 };
+    var rmStats = { matched: 0, not_matched: 0, manual: 0, unverifiable: 0, unchecked: 0 };
+    results.forEach(function (r) {
+      if (r.status === 'found_pdf') refStats.pdf++;
+      else if (r.status === 'found_abstract') refStats.abs++;
+      else if (r.status === 'found_web_page') refStats.web++;
+      else if (r.status === 'bib_url_unreachable') refStats.broken++;
+      else refStats.nf++;
+      var rm = r.ref_match;
+      if (!rm) rmStats.unchecked++;
+      else if (rm.verdict === 'matched') rmStats.matched++;
+      else if (rm.verdict === 'not_matched') rmStats.not_matched++;
+      else if (rm.verdict === 'manual_matched' || rm.verdict === 'manual_not_matched') rmStats.manual++;
+      else rmStats.unverifiable++;
+    });
+    _renderDashBreakdown('dash-ref-breakdown', [
+      { dot: 'pdf',      label: 'PDF found',      count: refStats.pdf,    total: results.length },
+      { dot: 'abstract', label: 'Abstract only',   count: refStats.abs,    total: results.length },
+      { dot: 'webpage',  label: 'Web page',        count: refStats.web,    total: results.length },
+      { dot: 'notfound', label: 'Broken URL',      count: refStats.broken, total: results.length },
+      { dot: 'notfound', label: 'Not found',       count: refStats.nf,     total: results.length },
+      { dot: 'pdf',      label: 'Identity matched',     count: rmStats.matched,      total: results.length },
+      { dot: 'notfound', label: 'Identity NOT matched', count: rmStats.not_matched,  total: results.length },
+      { dot: 'abstract', label: 'Identity unverifiable', count: rmStats.unverifiable, total: results.length },
+      { dot: 'webpage',  label: 'Identity manual',      count: rmStats.manual,       total: results.length },
+      { dot: 'notfound', label: 'Identity unchecked',   count: rmStats.unchecked,    total: results.length },
+    ]);
+
+    // ---- Citation breakdown ----
+    _renderDashBreakdown('dash-cite-breakdown', [
+      { dot: 'supported',     label: 'Supported',       count: verdictBuckets.supported,     total: citations.length },
+      { dot: 'partial',       label: 'Partial',          count: verdictBuckets.partial,       total: citations.length },
+      { dot: 'not_supported', label: 'Not supported',    count: verdictBuckets.not_supported, total: citations.length },
+      { dot: 'unknown',       label: 'Unknown',          count: verdictBuckets.unknown,       total: citations.length },
+      { dot: 'manual',        label: 'Manual override',  count: verdictBuckets.manual,        total: citations.length },
+      { dot: 'unchecked',     label: 'Not yet checked',  count: verdictBuckets.unchecked,     total: citations.length },
+    ]);
+
+    // ---- Activity log ----
+    var activity = proj.activity || [];
+    var actPanel = el('dash-activity-panel');
+    if (activity.length > 0 && actPanel) {
+      actPanel.style.display = '';
+      var actList = el('dash-activity-list');
+      actList.innerHTML = '';
+      activity.slice(-10).reverse().forEach(function (a) {
+        var row = document.createElement('div');
+        row.className = 'dash-activity-row';
+        row.innerHTML = '<span class="dash-activity-row__time">' + escapeHtml(_relativeTime(a.ts)) + '</span>'
+          + '<span class="dash-activity-row__msg">' + escapeHtml(a.message || a.type) + '</span>';
+        actList.appendChild(row);
+      });
+    } else if (actPanel) {
+      actPanel.style.display = 'none';
+    }
+
+    // ---- Operations strip state ----
     el('dash-csv-btn').disabled = !hasResults;
     el('dash-pdf-btn').disabled = !hasResults;
+    var buildMdBtn = el('dash-build-md-btn');
+    if (buildMdBtn) buildMdBtn.disabled = !hasResults;
+    var checkRmBtn = el('dash-check-refs-match-btn');
+    if (checkRmBtn) checkRmBtn.disabled = !hasResults;
+    var validityBtn = el('dash-validity-report-btn');
+    if (validityBtn) validityBtn.disabled = !hasResults;
+    var dlRefsBtn = el('dash-download-refs-btn');
+    if (dlRefsBtn) dlRefsBtn.disabled = !hasResults;
+    el('dash-view-refs-btn').disabled = !hasResults;
 
-    // Statistics
-    var statsDiv = el('dash-stats');
-    if (hasResults) {
-      statsDiv.style.display = '';
-      var s = { total: 0, pdf: 0, abs: 0, web: 0, nf: 0 };
-      proj.results.forEach(function (r) {
-        s.total++;
-        if (r.status === 'found_pdf') s.pdf++;
-        else if (r.status === 'found_abstract') s.abs++;
-        else if (r.status === 'found_web_page') s.web++;
-        else s.nf++;
-      });
-      el('dash-stat-total').textContent = s.total;
-      el('dash-stat-pdf').textContent = s.pdf;
-      el('dash-stat-abstract').textContent = s.abs;
-      el('dash-stat-webpage').textContent = s.web;
-      el('dash-stat-notfound').textContent = s.nf;
-    } else {
-      statsDiv.style.display = 'none';
-    }
+    // Cache results + parsed_refs for other views
+    allResults = results;
+    allParsedRefs = parsedRefs;
 
     showView('dashboard');
+  }
+
+  // Dashboard render helpers
+  function _dashBar(barId, value, total, variant) {
+    var fill = el(barId);
+    if (!fill) return;
+    var pct = total > 0 ? Math.round((value / total) * 100) : 0;
+    fill.style.width = pct + '%';
+    fill.className = 'dash-status__fill' + (variant === 'warn' ? ' dash-status__fill--warn' : '');
+  }
+
+  function _renderDashIssues(items) {
+    var list = el('dash-issues-list');
+    if (!list) return;
+    if (!items.length) { list.innerHTML = '<p class="dash-panel__empty">No issues.</p>'; return; }
+    list.innerHTML = '';
+    items.forEach(function (item) {
+      var row = document.createElement('div');
+      row.className = 'dash-issue-row';
+      row.innerHTML =
+        '<span class="dash-issue-row__badge dash-issue-row__badge--' + item.cls + '">' + escapeHtml(item.badge) + '</span>' +
+        '<span class="dash-issue-row__key">' + escapeHtml(item.key) + '</span>' +
+        '<span class="dash-issue-row__reason">' + escapeHtml(item.reason) + '</span>';
+      row.addEventListener('click', function () {
+        if (item.idx != null) {
+          openReviewView();
+          setTimeout(function () { navigateToCitation(item.idx); }, 400);
+        }
+      });
+      list.appendChild(row);
+    });
+  }
+
+  function _renderDashVerified(items) {
+    var list = el('dash-verified-list');
+    if (!list) return;
+    if (!items.length) { list.innerHTML = '<p class="dash-panel__empty">No verdicts yet.</p>'; return; }
+    list.innerHTML = '';
+    items.forEach(function (item) {
+      var row = document.createElement('div');
+      row.className = 'dash-issue-row';
+      row.innerHTML =
+        '<span class="dash-issue-row__badge dash-issue-row__badge--supported">&#10003;</span>' +
+        '<span class="dash-issue-row__key">' + escapeHtml(item.key) + '</span>' +
+        '<span class="dash-issue-row__reason">' + (item.v.manual ? 'manual' : escapeHtml(_relativeTime(item.v.checked_at))) + '</span>';
+      row.addEventListener('click', function () {
+        openReviewView();
+        setTimeout(function () { navigateToCitation(item.idx); }, 400);
+      });
+      list.appendChild(row);
+    });
+  }
+
+  function _renderDashBreakdown(containerId, rows) {
+    var container = el(containerId);
+    if (!container) return;
+    container.innerHTML = '';
+    rows.forEach(function (r) {
+      if (r.count === 0 && r.total === 0) return;
+      var pct = r.total > 0 ? Math.round((r.count / r.total) * 100) : 0;
+      var row = document.createElement('div');
+      row.className = 'dash-bd-row';
+      row.innerHTML =
+        '<span class="dash-bd-row__dot dash-bd-row__dot--' + r.dot + '"></span>' +
+        '<span class="dash-bd-row__label">' + escapeHtml(r.label) + '</span>' +
+        '<span class="dash-bd-row__count">' + r.count + '</span>' +
+        '<span class="dash-bd-row__pct">' + (r.total > 0 ? pct + '%' : '') + '</span>';
+      container.appendChild(row);
+    });
+    if (!container.children.length) {
+      container.innerHTML = '<p class="dash-panel__empty">No data.</p>';
+    }
+  }
+
+  function _relativeTime(isoStr) {
+    if (!isoStr) return '';
+    try {
+      var d = new Date(isoStr);
+      var now = new Date();
+      var diffMs = now - d;
+      if (diffMs < 0) return 'just now';
+      var mins = Math.floor(diffMs / 60000);
+      if (mins < 1) return 'just now';
+      if (mins < 60) return mins + 'm ago';
+      var hrs = Math.floor(mins / 60);
+      if (hrs < 24) return hrs + 'h ago';
+      var days = Math.floor(hrs / 24);
+      if (days === 1) return 'yesterday';
+      if (days < 30) return days + 'd ago';
+      return d.toLocaleDateString();
+    } catch (e) { return isoStr; }
   }
 
   function goToProjects() {
@@ -317,6 +588,7 @@
         totalRefs = data.total;
         processedCount = 0;
         allResults = [];
+        allParsedRefs = [];
         progressCount.textContent = '0 / ' + totalRefs;
         progressFill.style.width = '0%';
         progressFill.classList.add('progress-bar__fill--active');
@@ -384,6 +656,9 @@
     // Badges
     html += '<div class="result-card__badges">';
     html += statusBadge(result.status);
+    var rmBadge = _matchSummary(result.ref_match);
+    html += '<span class="status-badge status-badge--match-' + rmBadge.cls + '" title="' +
+            escapeHtml(rmBadge.title) + '">Match ' + escapeHtml(rmBadge.label) + '</span>';
     if (result.sources && result.sources.length) {
       result.sources.forEach(function (src) {
         html += '<span class="source-badge">' + escapeHtml(src) + '</span>';
@@ -393,6 +668,15 @@
       html += '<span class="source-badge">Cited: ' + escapeHtml(String(result.citation_count)) + '</span>';
     }
     html += '</div>';
+
+    // Broken-URL banner: surface the underlying failure so the user knows to fix the bib URL.
+    if (result.status === 'bib_url_unreachable') {
+      html += '<p class="result-card__error-msg">' + escapeHtml(result.error || 'Bib URL is unreachable');
+      if (result.url) {
+        html += ' &mdash; <a href="' + escapeHtml(result.url) + '" target="_blank" rel="noopener noreferrer">' + escapeHtml(result.url) + '</a>';
+      }
+      html += '</p>';
+    }
 
     // Local files indicators
     if (result.files && currentProjectSlug) {
@@ -628,8 +912,18 @@
         dlBtn.href = '/api/projects/' + currentProjectSlug + '/download-tex';
         dlBtn.download = data.tex_filename || 'document.tex';
 
+        // Wire Verify Table button
+        var openVerifyBtn = el('review-open-verify-btn');
+        if (openVerifyBtn) openVerifyBtn.onclick = function (e) { e.preventDefault(); openVerifyView(); };
+
         // Show view FIRST so CodeMirror can measure dimensions
         showView('review');
+
+        // Load v4 verdicts in parallel
+        Promise.all([loadClaimCheckSettings(), loadVerdictsFromProject()]).then(function () {
+          renderReferencesPanel();
+          if (citations.length > 0) renderVerdictHeader(currentCiteIndex);
+        });
 
         // Then initialize editor (may need a frame for layout to settle)
         requestAnimationFrame(function () {
@@ -719,6 +1013,17 @@
 
     highlightCitation(cite);
     showReferencePanel(cite.bib_key);
+    renderVerdictHeader(idx);
+    highlightSelectedRefCard(cite.bib_key);
+
+    // Persist last-viewed position for Resume Review on dashboard
+    if (currentProjectSlug) {
+      fetch('/api/projects/' + currentProjectSlug + '/last-viewed', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ citation_index: idx }),
+      }).catch(function () {});
+    }
   }
 
   function highlightCitation(cite) {
@@ -766,11 +1071,24 @@
       .catch(function () { alert('Save failed'); });
   }
 
+  // Look up a parsed_ref by exact bib_key match. Returns the parsed_ref dict or null.
+  // Used to surface the BibTeX tab when a result hasn't been generated yet but the
+  // entry exists in the .bib — so the user can initiate a manual search.
+  function _findParsedRefFallback(bibKey) {
+    if (!bibKey || !allParsedRefs || !allParsedRefs.length) return null;
+    for (var i = 0; i < allParsedRefs.length; i++) {
+      if (allParsedRefs[i].bib_key === bibKey) return allParsedRefs[i];
+    }
+    return null;
+  }
+
   function showReferencePanel(bibKey) {
     reviewIframe.style.display = 'none';
     reviewIframe.src = '';
     reviewAbstractText.style.display = 'none';
     reviewBibtexText.style.display = 'none';
+    var reviewMdText = el('review-md-text');
+    if (reviewMdText) reviewMdText.style.display = 'none';
     reviewNoContent.style.display = 'none';
 
     // Reset tabs
@@ -778,12 +1096,16 @@
     reviewTabHtml.classList.remove('review-tab--active');
     reviewTabAbstract.classList.remove('review-tab--active');
     reviewTabBibtex.classList.remove('review-tab--active');
+    if (reviewTabMd) reviewTabMd.classList.remove('review-tab--active');
     reviewTabPdf.disabled = true;
     reviewTabHtml.disabled = true;
     reviewTabAbstract.disabled = true;
     reviewTabBibtex.disabled = true;
+    if (reviewTabMd) reviewTabMd.disabled = true;
     reviewSetLinkBtn.disabled = false;
     reviewRefreshBtn.disabled = false;
+    var dlWarnReset = el('review-dl-warning');
+    if (dlWarnReset) dlWarnReset.style.display = 'none';
 
     if (!bibKey) {
       reviewRefKey.textContent = '';
@@ -799,14 +1121,80 @@
       if (allResults[i].bib_key === bibKey) { ref = allResults[i]; break; }
     }
 
+    var addRefBtn = el('review-add-ref-btn');
     if (!ref) {
       reviewRefKey.textContent = bibKey;
       reviewRefTitle.textContent = 'Reference not found in project results';
-      reviewRefMeta.innerHTML = '<span style="color:var(--color-error);">This citation key does not match any reference in the .bib file.</span>';
+      // If the exact bib_key is in parsed_refs (lookup hasn't produced a result yet),
+      // surface the raw BibTeX so the user can initiate a manual search.
+      var fallback = _findParsedRefFallback(bibKey);
+      var meta = '<span style="color:var(--color-error);">This citation key does not match any reference in the .bib file. Click <strong>Add Reference</strong> to enter the bibliography metadata manually.</span>';
+      if (fallback) {
+        meta = '<span style="color:var(--color-muted);">Parsed from the .bib but lookup has not run yet — see the <strong>BibTeX</strong> tab below.</span>';
+      }
+      reviewRefMeta.innerHTML = meta;
       reviewSetLinkBtn.disabled = true;
       reviewRefreshBtn.disabled = true;
-      reviewNoContent.style.display = 'block';
+      if (addRefBtn) {
+        addRefBtn.style.display = '';
+        addRefBtn.dataset.bibKey = bibKey;
+        addRefBtn.disabled = false;
+      }
+      // Surface the raw BibTeX if the exact bib_key was found in parsed_refs
+      if (fallback && fallback.raw_bib) {
+        reviewTabBibtex.disabled = false;
+        switchTab('bibtex', { raw_bib: fallback.raw_bib });
+      } else {
+        reviewNoContent.style.display = 'block';
+      }
       return;
+    }
+    if (addRefBtn) addRefBtn.style.display = 'none';
+
+    // Broken-URL banner: status='bib_url_unreachable' means the bib URL itself
+    // failed to download. We show a prominent warning and disable the data tabs
+    // (PDF/HTML/Abstract/Markdown) since none have content — only BibTeX is useful.
+    var brokenWarn = el('review-broken-url-warning');
+    var isBrokenUrl = ref.status === 'bib_url_unreachable';
+    if (brokenWarn) {
+      if (isBrokenUrl) {
+        var msg = '<strong>Broken bib URL — fix the citation.</strong> ';
+        msg += escapeHtml(ref.error || 'The URL in this bib entry could not be downloaded.');
+        if (ref.url) {
+          msg += '<br><span class="review-broken-url-warning__url">URL: <a href="' +
+                 escapeHtml(ref.url) + '" target="_blank" rel="noopener noreferrer">' +
+                 escapeHtml(ref.url) + '</a></span>';
+        }
+        msg += '<br><span class="review-broken-url-warning__hint">Use <strong>Set Link</strong>, ' +
+               '<strong>Upload PDF</strong>, or <strong>Paste Content</strong> in this panel ' +
+               'to provide a working source.</span>';
+        brokenWarn.innerHTML = msg;
+        brokenWarn.style.display = 'block';
+      } else {
+        brokenWarn.style.display = 'none';
+      }
+    }
+
+    // Reference identity match status (separate from broken-URL — can show together
+    // with normal status when the LLM has weighed in on whether the downloaded text
+    // actually matches the bib's title + authors).
+    var rmEl = el('review-ref-match');
+    if (rmEl) _renderRefMatchPanel(rmEl, ref, isBrokenUrl);
+
+    // Warn when a pdf_url is set but we have no local PDF file (site likely bot-blocks).
+    // The right-panel iframe will show the PDF from the remote URL (which works in a
+    // browser), but claim-checking uses the local .md — which won't include the PDF body.
+    var dlWarn = el('review-dl-warning');
+    if (dlWarn) {
+      var filesForWarn = ref.files || {};
+      if (!isBrokenUrl && ref.pdf_url && !filesForWarn.pdf) {
+        dlWarn.innerHTML = '<strong>PDF shown from remote URL</strong> — the file couldn\'t be downloaded locally ' +
+          '(site probably bot-blocks). Claim-checking has only the abstract. ' +
+          'Click <strong>Upload PDF</strong> (in this panel) to save the file so it\'s included in the <code>.md</code>.';
+        dlWarn.style.display = 'block';
+      } else {
+        dlWarn.style.display = 'none';
+      }
     }
 
     // Top bar: key + title
@@ -834,25 +1222,33 @@
 
     reviewRefMeta.innerHTML = lines.join('<br>');
 
-    // Enable available tabs
-    var hasPdf = !!(files.pdf || ref.pdf_url);
-    var hasHtml = !!ref.url;
-    var hasAbstract = !!ref.abstract;
+    // Enable available tabs. For broken URLs, only BibTeX is meaningful — the
+    // bib URL itself failed to download, so loading it in the iframe would just
+    // 403 again, and we deliberately did not run the lookup pipeline so there's
+    // no abstract/PDF/MD either.
+    var hasPdf = !isBrokenUrl && !!(files.pdf || ref.pdf_url);
+    var hasHtml = !isBrokenUrl && !!(files.page || ref.url);
+    var hasAbstract = !isBrokenUrl && !!ref.abstract;
+    var hasMd = !!files.md;
     var hasBibtex = !!ref.raw_bib;
 
     reviewTabPdf.disabled = !hasPdf;
     reviewTabHtml.disabled = !hasHtml;
     reviewTabAbstract.disabled = !hasAbstract;
+    if (reviewTabMd) reviewTabMd.disabled = !hasMd;
     reviewTabBibtex.disabled = !hasBibtex;
 
     // Auto-select best tab
     if (hasPdf) switchTab('pdf', ref);
     else if (hasHtml) switchTab('html', ref);
     else if (hasAbstract) switchTab('abstract', ref);
+    else if (hasMd) switchTab('md', ref);
     else if (hasBibtex) switchTab('bibtex', ref);
     else {
       reviewNoContent.style.display = 'block';
-      reviewNoContent.textContent = 'No content available. Use "Set Link" to add a URL.';
+      reviewNoContent.textContent = isBrokenUrl
+        ? 'Bib URL is unreachable. Use "Set Link", "Upload PDF", or "Paste Content" to provide a working source.'
+        : 'No content available. Use "Set Link" to add a URL.';
     }
   }
 
@@ -874,44 +1270,86 @@
     reviewIframe.src = '';
     reviewAbstractText.style.display = 'none';
     reviewBibtexText.style.display = 'none';
+    var mdResetEl = el('review-md-text');
+    if (mdResetEl) mdResetEl.style.display = 'none';
+    var pdfFooterReset = el('review-pdf-footer');
+    if (pdfFooterReset) { pdfFooterReset.style.display = 'none'; pdfFooterReset.innerHTML = ''; }
     reviewNoContent.style.display = 'none';
     reviewTabPdf.classList.remove('review-tab--active');
     reviewTabHtml.classList.remove('review-tab--active');
     reviewTabAbstract.classList.remove('review-tab--active');
     reviewTabBibtex.classList.remove('review-tab--active');
+    if (reviewTabMd) reviewTabMd.classList.remove('review-tab--active');
 
-    var pdfSrc = files.pdf
+    // PDF source resolution: prefer the local copy; fall back to remote URL.
+    var localPdfSrc = files.pdf
       ? '/api/projects/' + currentProjectSlug + '/files/' + encodeURIComponent(files.pdf)
-      : ref.pdf_url;
+      : null;
+    var remotePdfUrl = ref.pdf_url || null;
+    var pdfSrc = localPdfSrc || remotePdfUrl;
 
     if (tab === 'pdf' && pdfSrc) {
       reviewTabPdf.classList.add('review-tab--active');
       reviewIframe.src = pdfSrc;
       reviewIframe.style.display = 'block';
-    } else if (tab === 'html' && ref.url) {
+
+      // Footer with provenance: which copy is shown + link to the remote URL
+      var pdfFooter = el('review-pdf-footer');
+      if (pdfFooter) {
+        var showingLocal = !!localPdfSrc;
+        var parts = [];
+        parts.push('<span class="review-pdf-footer__src review-pdf-footer__src--' +
+                   (showingLocal ? 'local' : 'remote') + '">' +
+                   (showingLocal ? 'Local' : 'Remote') + '</span>');
+        parts.push('<span class="review-pdf-footer__label">Showing ' +
+                   (showingLocal ? 'downloaded copy. ' : 'URL directly (not downloaded). ') + '</span>');
+        if (remotePdfUrl) {
+          parts.push('<span class="review-pdf-footer__label">Source:</span>');
+          parts.push('<a class="review-pdf-footer__link" href="' + escapeHtml(remotePdfUrl) +
+                     '" target="_blank" rel="noopener noreferrer">' +
+                     escapeHtml(remotePdfUrl) + '</a>');
+        } else if (showingLocal) {
+          parts.push('<span class="review-pdf-footer__label">(no remote URL on record)</span>');
+        }
+        pdfFooter.innerHTML = parts.join(' ');
+        pdfFooter.style.display = 'flex';
+      }
+    } else if (tab === 'html' && (files.page || ref.url)) {
       reviewTabHtml.classList.add('review-tab--active');
-      // Check if we have a locally saved page — use that (no iframe blocking)
+      // Prefer a locally saved page (downloaded HTML or pasted-content wrapper) — no iframe blocking
       if (files.page && currentProjectSlug) {
         reviewIframe.src = '/api/projects/' + currentProjectSlug + '/files/' + encodeURIComponent(files.page);
         reviewIframe.style.display = 'block';
       } else {
-        // Try iframe but show prominent fallback link since many sites block framing
+        // Try iframe with the live URL but show prominent fallback link since many sites block framing
         reviewIframe.src = ref.url;
         reviewIframe.style.display = 'block';
-        // Detect blocked iframe: if iframe loads about:blank or throws, hide it
-        reviewIframe.onerror = function () {
-          reviewIframe.style.display = 'none';
-        };
+        reviewIframe.onerror = function () { reviewIframe.style.display = 'none'; };
       }
-      reviewNoContent.innerHTML = '<div style="padding:1rem;text-align:center;">' +
-        '<p style="margin-bottom:0.5rem;color:var(--color-muted);">If the page is blank, the site blocks embedded frames.</p>' +
-        '<a href="' + escapeHtml(ref.url) + '" target="_blank" rel="noopener noreferrer" ' +
-        'style="color:var(--color-primary);font-weight:700;font-size:1rem;">Open in new tab &rarr;</a></div>';
-      reviewNoContent.style.display = 'block';
+      if (ref.url) {
+        reviewNoContent.innerHTML = '<div style="padding:1rem;text-align:center;">' +
+          '<p style="margin-bottom:0.5rem;color:var(--color-muted);">If the page is blank, the site blocks embedded frames.</p>' +
+          '<a href="' + escapeHtml(ref.url) + '" target="_blank" rel="noopener noreferrer" ' +
+          'style="color:var(--color-primary);font-weight:700;font-size:1rem;">Open in new tab &rarr;</a></div>';
+        reviewNoContent.style.display = 'block';
+      } else {
+        reviewNoContent.style.display = 'none';  // pasted-only: no fallback link needed
+      }
     } else if (tab === 'abstract' && ref.abstract) {
       reviewTabAbstract.classList.add('review-tab--active');
       reviewAbstractText.textContent = ref.abstract;
       reviewAbstractText.style.display = 'block';
+    } else if (tab === 'md' && files.md) {
+      if (reviewTabMd) reviewTabMd.classList.add('review-tab--active');
+      var mdEl = el('review-md-text');
+      if (mdEl) {
+        mdEl.style.display = 'block';
+        mdEl.textContent = 'Loading...';
+        fetch('/api/projects/' + currentProjectSlug + '/files/' + encodeURIComponent(files.md))
+          .then(function (r) { return r.text(); })
+          .then(function (text) { mdEl.textContent = text; })
+          .catch(function (e) { mdEl.textContent = 'Failed to load .md: ' + e.message; });
+      }
     } else if (tab === 'bibtex' && ref.raw_bib) {
       reviewTabBibtex.classList.add('review-tab--active');
       reviewBibtexText.textContent = ref.raw_bib;
@@ -923,6 +1361,966 @@
 
   function nextCitation() { navigateToCitation(currentCiteIndex + 1); }
   function prevCitation() { navigateToCitation(currentCiteIndex - 1); }
+
+  /* ==========================================================
+     v4: claim-check verdicts (References panel + Verdict header + SSE)
+     ========================================================== */
+
+  var claimChecks = {};         // cache_key -> verdict object
+  var citationCacheKeys = {};   // citation_index -> cache_key (mirrors server)
+  var checkSessionId = null;
+  var checkEventSource = null;
+  var claimCheckEnabled = false;
+
+  function loadClaimCheckSettings() {
+    return fetch('/api/settings/claim-check')
+      .then(function (r) { return r.json(); })
+      .then(function (s) {
+        claimCheckEnabled = !!(s.enabled && s.configured);
+        var checkAllBtn = el('review-check-all-btn');
+        if (checkAllBtn) {
+          checkAllBtn.disabled = !claimCheckEnabled || citations.length === 0;
+          checkAllBtn.title = claimCheckEnabled
+            ? 'Run LLM check on every citation'
+            : 'Configure OPENAI_API_KEY in settings.json or env to enable';
+        }
+        return s;
+      })
+      .catch(function () { /* ignore */ });
+  }
+
+  function loadVerdictsFromProject() {
+    if (!currentProjectSlug) return Promise.resolve();
+    return fetch('/api/projects/' + currentProjectSlug + '/citations-with-verdicts')
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        claimChecks = data.claim_checks || {};
+        citationCacheKeys = {};
+        (data.citations || []).forEach(function (c) {
+          if (c.claim_check_key) citationCacheKeys[c.index] = c.claim_check_key;
+        });
+      })
+      .catch(function () { /* ignore */ });
+  }
+
+  function getVerdictForCitation(idx) {
+    var ck = citationCacheKeys[idx];
+    if (!ck) return null;
+    return claimChecks[ck] || null;
+  }
+
+  // ---- References panel ----
+  var refsFilters = { search: '', sort: 'doc', issuesOnly: false };
+
+  function renderReferencesPanel() {
+    var listEl = el('review-refs-list');
+    if (!listEl) return;
+    listEl.innerHTML = '';
+
+    if (!citations.length) {
+      listEl.innerHTML = '<div class="review-refs__empty">No citations.</div>';
+      return;
+    }
+
+    // One row per CITATION OCCURRENCE, in document order.
+    var rows = citations.map(function (c, idx) {
+      var ref = null;
+      for (var i = 0; i < allResults.length; i++) {
+        if (allResults[i].bib_key === c.bib_key) { ref = allResults[i]; break; }
+      }
+      return { idx: idx, citation: c, ref: ref, verdict: getVerdictForCitation(idx) };
+    });
+
+    // How many times does each bib_key appear, and which occurrence index is this?
+    var occurrenceCounts = {};
+    var occurrenceIndex = {};
+    citations.forEach(function (c) {
+      occurrenceCounts[c.bib_key] = (occurrenceCounts[c.bib_key] || 0) + 1;
+    });
+    var seenSoFar = {};
+    rows.forEach(function (r) {
+      seenSoFar[r.citation.bib_key] = (seenSoFar[r.citation.bib_key] || 0) + 1;
+      r.occurrence = seenSoFar[r.citation.bib_key];
+      r.totalOccurrences = occurrenceCounts[r.citation.bib_key];
+    });
+
+    // Filter
+    var search = (refsFilters.search || '').toLowerCase();
+    if (search) {
+      rows = rows.filter(function (r) {
+        var hay = (r.citation.bib_key + ' ' + ((r.ref && r.ref.title) || '')).toLowerCase();
+        return hay.indexOf(search) !== -1;
+      });
+    }
+    if (refsFilters.issuesOnly) {
+      rows = rows.filter(function (r) {
+        if (!r.verdict) return false;
+        return r.verdict.verdict !== 'supported';
+      });
+    }
+
+    // Sort
+    if (refsFilters.sort === 'worst') {
+      rows.sort(function (a, b) {
+        return verdictRank(b.verdict) - verdictRank(a.verdict);
+      });
+    } else if (refsFilters.sort === 'key') {
+      rows.sort(function (a, b) {
+        return a.citation.bib_key.localeCompare(b.citation.bib_key) || (a.idx - b.idx);
+      });
+    }
+    // default 'doc' = by idx (already sorted that way)
+
+    if (!rows.length) {
+      listEl.innerHTML = '<div class="review-refs__empty">No matches.</div>';
+      return;
+    }
+
+    rows.forEach(function (r) {
+      var card = document.createElement('div');
+      card.className = 'review-ref-card';
+      if (r.idx === currentCiteIndex) card.classList.add('review-ref-card--selected');
+      card.dataset.idx = r.idx;
+      card.dataset.bibKey = r.citation.bib_key;
+
+      var titleStr = (r.ref && r.ref.title) || '(no metadata)';
+      var v = r.verdict;
+      var verdictLabel, verdictCls;
+      if (!v) { verdictLabel = '? Not checked'; verdictCls = 'review-ref-card__verdict--unchecked'; }
+      else if (v.verdict === 'supported')      { verdictLabel = '✓ Supported'; verdictCls = 'review-ref-card__verdict--supported'; }
+      else if (v.verdict === 'partial')        { verdictLabel = '⚠ Partial'; verdictCls = 'review-ref-card__verdict--partial'; }
+      else if (v.verdict === 'not_supported')  { verdictLabel = '✗ Not supported'; verdictCls = 'review-ref-card__verdict--not_supported'; }
+      else                                      { verdictLabel = '? Unknown'; verdictCls = 'review-ref-card__verdict--unknown'; }
+      var manualMark = (v && v.manual) ? ' <span class="review-ref-card__manual" title="Manually set">✎</span>' : '';
+      var conf = (v && v.confidence != null && !v.manual) ? (' ' + Math.round(v.confidence * 100) + '%') : '';
+
+      var occLabel = r.totalOccurrences > 1
+        ? ' <span class="review-ref-card__occ" title="Occurrence in document">(' + r.occurrence + '/' + r.totalOccurrences + ')</span>'
+        : '';
+
+      // Source label: pdf (green) / html (blue) / abstract (orange) / not found (red)
+      var src = _refSourceLabel(r.ref);
+      // Identity-match indicator: ✓ matched, ✗ not matched, ✎ manual, ? unchecked
+      var match = _matchSummary(r.ref && r.ref.ref_match);
+
+      card.innerHTML =
+        '<div class="review-ref-card__top">' +
+          '<span class="review-ref-card__line">L' + (r.citation.line || '?') + '</span>' +
+          '<span class="review-ref-card__key">' + escapeHtml(r.citation.bib_key) + '</span>' +
+          occLabel +
+          '<span class="review-ref-card__src review-ref-card__src--' + src.cls + '" title="' + escapeHtml(src.title) + '">' + escapeHtml(src.label) + '</span>' +
+          '<span class="review-ref-card__match review-ref-card__match--' + match.cls + '" title="' + escapeHtml(match.title) + '">' + escapeHtml(match.label) + '</span>' +
+        '</div>' +
+        '<div class="review-ref-card__title" title="' + escapeHtml(titleStr) + '">' + escapeHtml(titleStr) + '</div>' +
+        '<div class="review-ref-card__verdict-row">' +
+          '<button type="button" class="review-ref-card__verdict ' + verdictCls + '" data-act="set-verdict" data-idx="' + r.idx + '" title="Click to override status">' +
+            escapeHtml(verdictLabel) + escapeHtml(conf) +
+          '</button>' +
+          manualMark +
+        '</div>';
+
+      listEl.appendChild(card);
+    });
+  }
+
+  // Reference identity match — short label/icon for the card.
+  function _matchSummary(match) {
+    if (!match) return { label: '?', cls: 'unchecked', title: 'Identity not checked' };
+    var v = match.verdict;
+    var ev = match.evidence || '';
+    if (v === 'matched')             return { label: '✓', cls: 'matched',     title: 'Identity verified — title/authors match downloaded text. ' + ev };
+    if (v === 'not_matched')         return { label: '✗', cls: 'not_matched', title: 'Identity MISMATCH — downloaded text does not match bib. ' + ev };
+    if (v === 'manual_matched')      return { label: '✎✓', cls: 'manual',     title: 'Manually marked OK. ' + ev };
+    if (v === 'manual_not_matched')  return { label: '✎✗', cls: 'manual_bad', title: 'Manually marked NOT MATCHED. ' + ev };
+    return { label: '?', cls: 'unverifiable', title: ev || 'Could not verify' };
+  }
+
+  // Determine the source label shown on each reference card.
+  // Priority: broken URL → "broken URL" (amber); no .md → "not found" (red);
+  // pdf → green; html → blue; abstract-only → orange.
+  function _refSourceLabel(ref) {
+    var files = (ref && ref.files) || {};
+    if (ref && ref.status === 'bib_url_unreachable') {
+      return { label: 'broken URL', cls: 'broken',
+               title: ref.error || 'Bib URL unreachable — fix the citation' };
+    }
+    if (!ref || !files.md) {
+      return { label: 'not found', cls: 'notfound', title: 'No .md file' };
+    }
+    if (files.pdf) {
+      return { label: 'pdf', cls: 'pdf', title: 'PDF source' };
+    }
+    if (files.page) {
+      return { label: 'html', cls: 'html', title: 'HTML source' };
+    }
+    if (ref.abstract) {
+      return { label: 'abstract', cls: 'abstract', title: 'Abstract only (no full text)' };
+    }
+    // .md exists but no pdf/html/abstract — shouldn't happen, but show a neutral label
+    return { label: 'md', cls: 'abstract', title: 'Markdown only' };
+  }
+
+  // ---------------------------------------------------------
+  // Reference identity match panel (right-pane, above tabs)
+  // ---------------------------------------------------------
+  function _renderRefMatchPanel(rmEl, ref, isBrokenUrl) {
+    if (!ref || !ref.bib_key) { rmEl.style.display = 'none'; return; }
+    if (isBrokenUrl) { rmEl.style.display = 'none'; return; }   // broken-URL banner already explains
+
+    var match = ref.ref_match;
+    var hasMd = !!(ref.files && ref.files.md);
+
+    var verdict = match ? match.verdict : null;
+    var label, sub, kind;
+    if (!match) {
+      label = '? Identity not checked';
+      sub = hasMd ? 'Click <strong>Check</strong> to verify the downloaded text matches the bib title + authors.'
+                  : 'No .md content yet — nothing to check.';
+      kind = 'unchecked';
+    } else if (verdict === 'matched') {
+      label = '✓ Identity verified';
+      sub = match.evidence || 'Title and authors found in the downloaded text.';
+      kind = 'matched';
+    } else if (verdict === 'not_matched') {
+      label = '✗ Identity NOT matched — review';
+      sub = (match.evidence || 'The downloaded text does not contain the claimed title/authors.') +
+            ' &nbsp;<em>If this is wrong, mark as OK below.</em>';
+      kind = 'not_matched';
+    } else if (verdict === 'manual_matched') {
+      label = '✎ ✓ Manually marked OK';
+      sub = match.evidence || 'You overrode this to "matched".';
+      kind = 'manual';
+    } else if (verdict === 'manual_not_matched') {
+      label = '✎ ✗ Manually marked NOT matched';
+      sub = match.evidence || 'You overrode this to "not matched".';
+      kind = 'manual_bad';
+    } else {
+      label = '? Could not verify';
+      sub = match.evidence || '';
+      kind = 'unverifiable';
+    }
+
+    var html = '';
+    html += '<div class="review-ref-match__main">';
+    html += '<span class="review-ref-match__label review-ref-match__label--' + kind + '">' + escapeHtml(label) + '</span>';
+    html += '<div class="review-ref-match__actions">';
+    html += '<button type="button" class="btn btn--outline btn--small" data-act="rm-recheck"' +
+            (hasMd ? '' : ' disabled') + '>Check</button>';
+    html += '<button type="button" class="btn btn--outline btn--small" data-act="rm-mark-ok" title="Mark identity as matched (overrides any LLM verdict)">Mark OK</button>';
+    html += '<button type="button" class="btn btn--outline btn--small" data-act="rm-mark-bad" title="Mark identity as not matched">Mark NOT</button>';
+    if (match) {
+      html += '<button type="button" class="btn btn--ghost btn--small" data-act="rm-clear" title="Clear the verdict (treat as unchecked)">Clear</button>';
+    }
+    html += '</div></div>';
+    html += '<div class="review-ref-match__sub">' + sub + '</div>';
+    if (match && match.model && !match.manual) {
+      html += '<div class="review-ref-match__meta">model: ' + escapeHtml(match.model) +
+              (match.checked_at ? ' · ' + escapeHtml(match.checked_at.split('T')[0]) : '') + '</div>';
+    }
+    rmEl.innerHTML = html;
+    rmEl.className = 'review-ref-match review-ref-match--' + kind;
+    rmEl.style.display = 'block';
+
+    var bibKey = ref.bib_key;
+    rmEl.querySelectorAll('button[data-act]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var act = btn.dataset.act;
+        if (act === 'rm-recheck')   refMatchRecheck(bibKey);
+        else if (act === 'rm-mark-ok')  refMatchSetManual(bibKey, 'matched');
+        else if (act === 'rm-mark-bad') refMatchSetManual(bibKey, 'not_matched');
+        else if (act === 'rm-clear')    refMatchClear(bibKey);
+      });
+    });
+  }
+
+  function _updateRefMatchInState(bibKey, match) {
+    for (var i = 0; i < allResults.length; i++) {
+      if (allResults[i].bib_key === bibKey) {
+        if (match === null) delete allResults[i].ref_match;
+        else allResults[i].ref_match = match;
+        break;
+      }
+    }
+    // Re-render the dependent panels
+    if (typeof renderReferencesPanel === 'function') renderReferencesPanel();
+    var bibKeyOfCurrent = citations[currentCiteIndex] ? citations[currentCiteIndex].bib_key : null;
+    if (bibKeyOfCurrent === bibKey && typeof showReferencePanel === 'function') {
+      showReferencePanel(bibKey);
+    }
+  }
+
+  function refMatchRecheck(bibKey) {
+    if (!currentProjectSlug) return;
+    var rmEl = el('review-ref-match');
+    if (rmEl) rmEl.classList.add('review-ref-match--checking');
+    fetch('/api/projects/' + currentProjectSlug + '/check-reference-match/' + encodeURIComponent(bibKey),
+          { method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ force: true }) })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (rmEl) rmEl.classList.remove('review-ref-match--checking');
+        if (data && data.ok) _updateRefMatchInState(bibKey, data.ref_match);
+      })
+      .catch(function () { if (rmEl) rmEl.classList.remove('review-ref-match--checking'); });
+  }
+
+  function refMatchSetManual(bibKey, verdict) {
+    if (!currentProjectSlug) return;
+    fetch('/api/projects/' + currentProjectSlug + '/set-ref-match/' + encodeURIComponent(bibKey),
+          { method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ verdict: verdict }) })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (data && data.ok) _updateRefMatchInState(bibKey, data.ref_match);
+      });
+  }
+
+  function refMatchClear(bibKey) {
+    if (!currentProjectSlug) return;
+    fetch('/api/projects/' + currentProjectSlug + '/clear-ref-match/' + encodeURIComponent(bibKey),
+          { method: 'POST' })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (data && data.ok) _updateRefMatchInState(bibKey, null);
+      });
+  }
+
+  function verdictRank(v) {
+    if (!v) return -1;
+    return v.verdict === 'not_supported' ? 3
+         : v.verdict === 'partial' ? 2
+         : v.verdict === 'unknown' ? 1 : 0;
+  }
+
+  function highlightSelectedRefCard(bibKey) {
+    var listEl = el('review-refs-list');
+    if (!listEl) return;
+    var cards = listEl.querySelectorAll('.review-ref-card');
+    cards.forEach(function (c) {
+      var idx = parseInt(c.dataset.idx, 10);
+      if (idx === currentCiteIndex) {
+        c.classList.add('review-ref-card--selected');
+        try { c.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); } catch (e) {}
+      } else {
+        c.classList.remove('review-ref-card--selected');
+      }
+    });
+  }
+
+  // Manual verdict picker (modal-less popover)
+  function showVerdictPicker(idx, anchorEl) {
+    // Remove existing picker if any
+    var existing = document.getElementById('verdict-picker');
+    if (existing) existing.remove();
+
+    var picker = document.createElement('div');
+    picker.id = 'verdict-picker';
+    picker.className = 'verdict-picker';
+    picker.innerHTML =
+      '<div class="verdict-picker__title">Set verdict manually</div>' +
+      '<button type="button" data-v="supported"     class="verdict-picker__opt verdict-picker__opt--supported">✓ Supported</button>' +
+      '<button type="button" data-v="partial"       class="verdict-picker__opt verdict-picker__opt--partial">⚠ Partial</button>' +
+      '<button type="button" data-v="not_supported" class="verdict-picker__opt verdict-picker__opt--not_supported">✗ Not supported</button>' +
+      '<button type="button" data-v="unknown"       class="verdict-picker__opt verdict-picker__opt--unknown">? Unknown</button>' +
+      '<button type="button" data-v="clear"         class="verdict-picker__opt verdict-picker__opt--clear">Clear (re-check on next run)</button>' +
+      '<button type="button" data-v="cancel"        class="verdict-picker__opt verdict-picker__opt--cancel">Cancel</button>';
+
+    document.body.appendChild(picker);
+    var rect = anchorEl.getBoundingClientRect();
+    picker.style.position = 'fixed';
+    picker.style.left = Math.min(window.innerWidth - 220, rect.left) + 'px';
+    picker.style.top = (rect.bottom + 4) + 'px';
+    picker.style.zIndex = 1000;
+
+    function close() { try { picker.remove(); } catch (e) {} document.removeEventListener('click', onDocClick, true); }
+    function onDocClick(e) { if (!picker.contains(e.target)) close(); }
+    setTimeout(function () { document.addEventListener('click', onDocClick, true); }, 0);
+
+    picker.addEventListener('click', function (e) {
+      var btn = e.target.closest('button[data-v]');
+      if (!btn) return;
+      var val = btn.dataset.v;
+      close();
+      if (val === 'cancel') return;
+      if (val === 'clear') {
+        clearManualVerdict(idx);
+      } else {
+        setManualVerdict(idx, val);
+      }
+    });
+  }
+
+  function setManualVerdict(idx, verdictValue) {
+    if (!currentProjectSlug) return;
+    fetch('/api/projects/' + currentProjectSlug + '/set-verdict/' + idx, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ verdict: verdictValue }),
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (res) {
+        if (res.ok && res.verdict) {
+          claimChecks[res.cache_key] = res.verdict;
+          citationCacheKeys[idx] = res.cache_key;
+          renderReferencesPanel();
+          if (idx === currentCiteIndex) renderVerdictHeader(idx);
+          if (typeof window.verifyOnVerdict === 'function') {
+            window.verifyOnVerdict(idx, res.verdict, res.cache_key);
+          }
+        }
+      });
+  }
+
+  /* ---- Paste Content modal ---- */
+
+  function openPasteContentModal(bibKey) {
+    var modal = el('paste-content-modal');
+    if (!modal) return;
+    el('paste-content-key-label').textContent = bibKey;
+    el('paste-content-text').value = '';
+    el('paste-content-error').textContent = '';
+    el('paste-content-submit').disabled = false;
+    el('paste-content-submit').textContent = 'Save';
+    modal.style.display = '';
+    modal.dataset.bibKey = bibKey;
+    setTimeout(function () { try { el('paste-content-text').focus(); } catch (e) {} }, 0);
+  }
+
+  function closePasteContentModal() {
+    var modal = el('paste-content-modal');
+    if (modal) modal.style.display = 'none';
+  }
+
+  function submitPasteContent() {
+    if (!currentProjectSlug) return;
+    var modal = el('paste-content-modal');
+    var bibKey = modal.dataset.bibKey;
+    var content = el('paste-content-text').value;
+    var errEl = el('paste-content-error');
+    errEl.textContent = '';
+    if (!content || !content.trim()) {
+      errEl.textContent = 'Paste some content first.';
+      return;
+    }
+    var submitBtn = el('paste-content-submit');
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Saving...';
+    fetch('/api/projects/' + currentProjectSlug + '/paste-content/' + encodeURIComponent(bibKey), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: content }),
+    })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
+      .then(function (res) {
+        if (!res.ok) {
+          errEl.textContent = (res.body && res.body.error) || 'Failed to save.';
+          submitBtn.disabled = false;
+          submitBtn.textContent = 'Save';
+          return;
+        }
+        closePasteContentModal();
+        if (typeof window._applySourceReplacementResponse === 'function') {
+          window._applySourceReplacementResponse(bibKey, res.body);
+        }
+      })
+      .catch(function (e) {
+        errEl.textContent = 'Network error: ' + e.message;
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Save';
+      });
+  }
+
+  /* ---- Add Reference modal (for citations with no .bib entry) ---- */
+
+  function openAddRefModal(bibKey) {
+    var modal = el('add-ref-modal');
+    if (!modal) return;
+    el('add-ref-key-label').textContent = bibKey;
+    var label2 = el('add-ref-key-label-2');
+    if (label2) label2.textContent = bibKey;
+    el('add-ref-bib-text').value = '';
+    el('add-ref-error').textContent = '';
+    el('add-ref-submit').disabled = false;
+    el('add-ref-submit').textContent = 'Add & Look Up';
+    modal.style.display = '';
+    modal.dataset.bibKey = bibKey;
+    setTimeout(function () { try { el('add-ref-bib-text').focus(); } catch (e) {} }, 0);
+  }
+
+  function closeAddRefModal() {
+    var modal = el('add-ref-modal');
+    if (modal) modal.style.display = 'none';
+  }
+
+  function submitAddRef() {
+    if (!currentProjectSlug) return;
+    var modal = el('add-ref-modal');
+    var bibKey = modal.dataset.bibKey;
+    var bibText = el('add-ref-bib-text').value.trim();
+    var errEl = el('add-ref-error');
+    errEl.textContent = '';
+    if (!bibText) { errEl.textContent = 'Paste a BibTeX entry.'; return; }
+    // Quick client-side sanity check
+    if (bibText.indexOf('@') === -1 || bibText.indexOf('{') === -1) {
+      errEl.textContent = 'That does not look like a BibTeX entry (expected something like "@article{...}").';
+      return;
+    }
+
+    var submitBtn = el('add-ref-submit');
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Looking up...';
+
+    fetch('/api/projects/' + currentProjectSlug + '/add-reference', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bib_key: bibKey, bib_text: bibText }),
+    })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, status: r.status, body: j }; }); })
+      .then(function (res) {
+        if (!res.ok) {
+          errEl.textContent = res.body.error || 'Failed to add reference.';
+          submitBtn.disabled = false;
+          submitBtn.textContent = 'Add & Look Up';
+          return;
+        }
+        pollAddRefStatus(bibKey);
+      })
+      .catch(function (e) {
+        errEl.textContent = 'Network error: ' + e.message;
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Add & Look Up';
+      });
+  }
+
+  function pollAddRefStatus(bibKey) {
+    var submitBtn = el('add-ref-submit');
+    var pollCount = 0;
+    var poll = setInterval(function () {
+      pollCount++;
+      fetch('/api/projects/' + currentProjectSlug + '/refresh-status/' + encodeURIComponent(bibKey))
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (data.status === 'done') {
+            clearInterval(poll);
+            if (data.result) {
+              // Add to local cache and refresh UI
+              var existing = false;
+              for (var i = 0; i < allResults.length; i++) {
+                if (allResults[i].bib_key === bibKey) { allResults[i] = data.result; existing = true; break; }
+              }
+              if (!existing) allResults.push(data.result);
+              closeAddRefModal();
+              showReferencePanel(bibKey);
+              renderReferencesPanel();
+              renderVerdictHeader(currentCiteIndex);
+            } else {
+              el('add-ref-error').textContent = 'Lookup failed: ' + (data.error || 'unknown error');
+              submitBtn.disabled = false;
+              submitBtn.textContent = 'Add & Look Up';
+            }
+          } else if (pollCount > 90) {  // ~3 minutes
+            clearInterval(poll);
+            el('add-ref-error').textContent = 'Lookup is taking longer than expected. Try refreshing later.';
+            submitBtn.disabled = false;
+            submitBtn.textContent = 'Add & Look Up';
+          }
+        })
+        .catch(function () { /* ignore transient network errors mid-poll */ });
+    }, 2000);
+  }
+
+  function clearManualVerdict(idx) {
+    if (!currentProjectSlug) return;
+    fetch('/api/projects/' + currentProjectSlug + '/clear-verdict/' + idx, { method: 'POST' })
+      .then(function (r) { return r.json(); })
+      .then(function () {
+        delete citationCacheKeys[idx];
+        renderReferencesPanel();
+        if (idx === currentCiteIndex) renderVerdictHeader(idx);
+      });
+  }
+
+  // ---- Verdict header ----
+  function renderVerdictHeader(idx) {
+    var box = el('review-verdict');
+    var emptyBox = el('review-verdict-empty');
+    if (!box || !emptyBox) return;
+
+    var verdict = getVerdictForCitation(idx);
+    if (!verdict) {
+      box.style.display = 'none';
+      emptyBox.style.display = claimCheckEnabled ? 'flex' : 'none';
+      return;
+    }
+
+    box.style.display = 'flex';
+    emptyBox.style.display = 'none';
+
+    var v = verdict.verdict || 'unknown';
+    var badge = el('review-verdict-badge');
+    badge.className = 'review-verdict__badge review-verdict__badge--' + v;
+    badge.textContent = (v === 'supported' ? '✓ Supported'
+                       : v === 'partial' ? '⚠ Partial'
+                       : v === 'not_supported' ? '✗ Not supported'
+                       : '? Unknown');
+    var conf = verdict.confidence;
+    el('review-verdict-conf').textContent = (conf != null) ? ('confidence ' + Math.round(conf * 100) + '%') : '';
+    el('review-verdict-explanation').textContent = verdict.explanation || '';
+    var ev = el('review-verdict-evidence');
+    if (verdict.evidence_quote) {
+      ev.textContent = '"' + verdict.evidence_quote + '"';
+    } else {
+      ev.textContent = '';
+    }
+  }
+
+  // ---- Single-citation check ----
+  function checkSingleCitation(idx, force) {
+    if (!currentProjectSlug || idx == null) return Promise.resolve();
+    var statusEl = el('review-check-status');
+    if (statusEl) statusEl.textContent = 'Checking...';
+    return fetch('/api/projects/' + currentProjectSlug + '/check-citation/' + idx, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ force: !!force }),
+    })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
+      .then(function (res) {
+        if (!res.ok) {
+          if (statusEl) statusEl.textContent = 'Error: ' + (res.body.error || 'check failed');
+          return;
+        }
+        var ck = res.body.cache_key;
+        claimChecks[ck] = res.body.verdict;
+        citationCacheKeys[idx] = ck;
+        if (statusEl) statusEl.textContent = '';
+        if (idx === currentCiteIndex) renderVerdictHeader(idx);
+        renderReferencesPanel();
+      });
+  }
+
+  // ---- Batch check ----
+  function checkAllCitations() {
+    if (!currentProjectSlug) return;
+    if (checkEventSource) { try { checkEventSource.close(); } catch (e) {} checkEventSource = null; }
+
+    var statusEl = el('review-check-status');
+    var stopBtn = el('review-stop-check-btn');
+    var checkAllBtn = el('review-check-all-btn');
+
+    if (statusEl) statusEl.textContent = 'Estimating...';
+
+    fetch('/api/projects/' + currentProjectSlug + '/check-citations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, status: r.status, body: j }; }); })
+      .then(function (res) {
+        if (res.status === 409) {
+          // Cost over the limit — confirm with the user
+          var est = (res.body.estimate || {}).estimated_cost_usd;
+          var estStr = (typeof est === 'number') ? est.toFixed(4) : '?';
+          if (confirm('Estimated cost is $' + estStr + ', which exceeds the configured max_batch_usd. Run anyway?')) {
+            return fetch('/api/projects/' + currentProjectSlug + '/check-citations', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ override_cost: true }),
+            }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); });
+          }
+          if (statusEl) statusEl.textContent = '';
+          return null;
+        }
+        return res;
+      })
+      .then(function (res) {
+        if (!res) return;
+        if (!res.ok) {
+          if (statusEl) statusEl.textContent = 'Error: ' + (res.body.error || 'failed');
+          return;
+        }
+        var sid = res.body.session_id;
+        checkSessionId = sid;
+        var total = res.body.n_citations || 0;
+        if (statusEl) statusEl.textContent = '0 / ' + total + ' checked';
+        if (stopBtn) stopBtn.style.display = '';
+        if (checkAllBtn) checkAllBtn.disabled = true;
+
+        checkEventSource = new EventSource(
+          '/api/projects/' + currentProjectSlug + '/check-status/' + sid
+        );
+        checkEventSource.addEventListener('progress', function (ev) {
+          var d;
+          try { d = JSON.parse(ev.data); } catch (e) { return; }
+          claimChecks[d.cache_key] = d.verdict;
+          citationCacheKeys[d.index] = d.cache_key;
+          if (statusEl) statusEl.textContent = d.progress + ' / ' + d.total + ' checked';
+          // Update verdict header if user is on this citation
+          if (d.index === currentCiteIndex) renderVerdictHeader(d.index);
+          // Refresh refs panel periodically (cheap — small DOM)
+          renderReferencesPanel();
+          // Notify the verify table view if open
+          if (typeof window.verifyOnVerdict === 'function') {
+            window.verifyOnVerdict(d.index, d.verdict, d.cache_key);
+          }
+        });
+        checkEventSource.addEventListener('complete', function () {
+          finalizeBatch();
+        });
+        checkEventSource.onerror = function () {
+          finalizeBatch('Connection lost.');
+        };
+      });
+  }
+
+  function finalizeBatch(errMsg) {
+    var statusEl = el('review-check-status');
+    var stopBtn = el('review-stop-check-btn');
+    var checkAllBtn = el('review-check-all-btn');
+    if (checkEventSource) { try { checkEventSource.close(); } catch (e) {} checkEventSource = null; }
+    if (stopBtn) stopBtn.style.display = 'none';
+    var verifyStopBtn = el('verify-stop-btn');
+    if (verifyStopBtn) verifyStopBtn.style.display = 'none';
+    if (checkAllBtn) checkAllBtn.disabled = !claimCheckEnabled || citations.length === 0;
+    if (statusEl) statusEl.textContent = errMsg || 'All checked';
+    checkSessionId = null;
+
+    // Detect mass-failure: every verdict is unknown with the same explanation
+    if (!errMsg) {
+      var allVerdicts = Object.values(claimChecks);
+      if (allVerdicts.length > 0) {
+        var allUnknown = allVerdicts.every(function (v) { return v.verdict === 'unknown'; });
+        var explanations = {};
+        allVerdicts.forEach(function (v) {
+          if (v.explanation) explanations[v.explanation] = (explanations[v.explanation] || 0) + 1;
+        });
+        var topExplanation = null, topCount = 0;
+        for (var ex in explanations) { if (explanations[ex] > topCount) { topCount = explanations[ex]; topExplanation = ex; } }
+        if (allUnknown && topCount === allVerdicts.length && topExplanation) {
+          alert('All ' + allVerdicts.length + ' citations returned "unknown".\n\nReason: ' + topExplanation +
+                '\n\nFix: install or configure the OpenAI client, then click Recheck.');
+        }
+      }
+    }
+
+    // After a successful batch, in the verify view default to showing only issues
+    if (!errMsg && el('view-verify') && el('view-verify').classList.contains('view--active')) {
+      verifyFilters.supported = false;
+      // Reflect in checkboxes
+      var fEl = el('verify-filters');
+      if (fEl) fEl.querySelectorAll('input[data-filter]').forEach(function (cb) {
+        cb.checked = !!verifyFilters[cb.dataset.filter];
+      });
+      renderVerifyTable();
+    }
+  }
+
+  function stopBatch() {
+    if (!currentProjectSlug || !checkSessionId) return;
+    fetch('/api/projects/' + currentProjectSlug + '/check-citations/' + checkSessionId + '/stop',
+      { method: 'POST' })
+      .finally(function () {
+        var statusEl = el('review-check-status');
+        if (statusEl) statusEl.textContent = 'Stopping...';
+      });
+  }
+
+  /* ==========================================================
+     v4: Verification Table view (View 5)
+     ========================================================== */
+
+  var verifyRows = [];          // augmented rows from the API
+  var verifyFilters = {
+    supported: true, partial: true, not_supported: true, unknown: true, unchecked: true,
+    search: '',
+  };
+  var verifySort = { col: 'index', dir: 'asc' };
+  var verifyExpanded = {};      // citation_index -> bool
+
+  function openVerifyView() {
+    if (!currentProjectSlug) return;
+    showView('verify');
+    refreshVerifyData();
+    // Wire SSE-driven row updates from in-flight batches (or future batches)
+    window.verifyOnVerdict = function (idx, verdict, ck) {
+      // Update local row if present and re-render that row
+      for (var i = 0; i < verifyRows.length; i++) {
+        if (verifyRows[i].index === idx) {
+          verifyRows[i].verdict = verdict;
+          break;
+        }
+      }
+      renderVerifyTable();
+      updateVerifyProgressBar();
+    };
+  }
+
+  function refreshVerifyData() {
+    return Promise.all([loadClaimCheckSettings(), fetchVerifyRows()]).then(function () {
+      var runBtn = el('verify-run-all-btn');
+      if (runBtn) runBtn.disabled = !claimCheckEnabled || verifyRows.length === 0;
+      renderVerifyTable();
+      updateVerifyProgressBar();
+    });
+  }
+
+  function fetchVerifyRows() {
+    return fetch('/api/projects/' + currentProjectSlug + '/citations-with-verdicts')
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        verifyRows = data.citations || [];
+        // Mirror into shared maps
+        claimChecks = data.claim_checks || {};
+        citationCacheKeys = {};
+        verifyRows.forEach(function (c) {
+          if (c.claim_check_key) citationCacheKeys[c.index] = c.claim_check_key;
+        });
+      });
+  }
+
+  function applyVerifyFiltersAndSort(rows) {
+    var q = (verifyFilters.search || '').toLowerCase();
+    var out = rows.filter(function (r) {
+      var v = r.verdict;
+      var bucket = v ? v.verdict : 'unchecked';
+      if (!verifyFilters[bucket]) return false;
+      if (q) {
+        var hay = (r.bib_key + ' ' + (r.context_before || '') + ' ' + (r.context_after || '') +
+                   ' ' + ((r.reference && r.reference.title) || '')).toLowerCase();
+        if (hay.indexOf(q) === -1) return false;
+      }
+      return true;
+    });
+    var col = verifySort.col, dir = verifySort.dir === 'desc' ? -1 : 1;
+    out.sort(function (a, b) {
+      var av, bv;
+      if (col === 'index') { av = a.index; bv = b.index; }
+      else if (col === 'line') { av = a.line; bv = b.line; }
+      else if (col === 'key') { av = a.bib_key || ''; bv = b.bib_key || ''; }
+      else if (col === 'verdict') { av = (a.verdict && a.verdict.verdict) || 'zzz'; bv = (b.verdict && b.verdict.verdict) || 'zzz'; }
+      else if (col === 'confidence') { av = (a.verdict && a.verdict.confidence) || -1; bv = (b.verdict && b.verdict.confidence) || -1; }
+      else { av = a.index; bv = b.index; }
+      if (av < bv) return -1 * dir;
+      if (av > bv) return 1 * dir;
+      return 0;
+    });
+    return out;
+  }
+
+  function renderVerifyTable() {
+    var tbody = el('verify-tbody');
+    if (!tbody) return;
+    var rows = applyVerifyFiltersAndSort(verifyRows);
+    tbody.innerHTML = '';
+    if (!rows.length) {
+      tbody.innerHTML = '<tr><td colspan="9" style="text-align:center; padding:2rem; color:#888;">No matching citations.</td></tr>';
+      return;
+    }
+    rows.forEach(function (r) {
+      var v = r.verdict;
+      var bucket = v ? v.verdict : 'unchecked';
+      var sentClean = '';
+      // Build a quick claim-sentence preview by joining context_before/after; ideally would call extract on server
+      var bef = (r.context_before || '').slice(-80);
+      var aft = (r.context_after || '').slice(0, 80);
+      sentClean = (bef + ' ' + (r.cite_command || ('\\cite{' + r.bib_key + '}')) + ' ' + aft).replace(/\s+/g, ' ').trim();
+
+      var refTitle = r.reference && r.reference.title;
+      var refDisplay = refTitle ? escapeHtml(refTitle) : '<span class="verify-cell-ref-missing">' + (r.reference && r.reference.has_md ? 'no title' : 'no .md content') + '</span>';
+
+      var verdictBadge = v
+        ? '<span class="verify-badge verify-badge--' + v.verdict + '">' + v.verdict + '</span>'
+        : '<span style="color:#999">—</span>';
+
+      var conf = (v && v.confidence != null) ? Math.round(v.confidence * 100) + '%' : '—';
+
+      var evidence = (v && v.evidence_quote) ? ('"' + v.evidence_quote + '"') : '—';
+
+      var tr = document.createElement('tr');
+      tr.className = 'verify-row' + (verifyExpanded[r.index] ? ' verify-row--expanded' : '');
+      tr.dataset.index = r.index;
+      tr.innerHTML =
+        '<td>' + r.index + '</td>' +
+        '<td>' + (r.line || '') + '</td>' +
+        '<td class="verify-cell-key">' + escapeHtml(r.bib_key || '') + '</td>' +
+        '<td class="verify-cell-sentence" title="' + escapeHtml(sentClean) + '">' + escapeHtml(sentClean) + '</td>' +
+        '<td>' + refDisplay + '</td>' +
+        '<td>' + verdictBadge + '</td>' +
+        '<td>' + conf + '</td>' +
+        '<td class="verify-cell-evidence" title="' + escapeHtml(evidence) + '">' + escapeHtml(evidence) + '</td>' +
+        '<td><div class="verify-actions">' +
+          '<button data-act="check" title="Check / Recheck">↻</button>' +
+          '<button data-act="open"  title="Open in Review">→</button>' +
+          '<button data-act="expand" title="Show details">▾</button>' +
+        '</div></td>';
+      tbody.appendChild(tr);
+
+      if (verifyExpanded[r.index]) {
+        var detailTr = document.createElement('tr');
+        detailTr.className = 'verify-detail-row';
+        var detailHtml =
+          '<td colspan="9" class="verify-detail">' +
+            '<h4>Claim paragraph (raw)</h4>' +
+            '<div class="verify-detail__paragraph">' + escapeHtml((r.context_before || '') + (r.cite_command || ('\\cite{' + r.bib_key + '}')) + (r.context_after || '')) + '</div>';
+        if (v) {
+          detailHtml += '<h4>Explanation</h4><div>' + escapeHtml(v.explanation || '') + '</div>';
+          if (v.evidence_quote) detailHtml += '<h4>Evidence</h4><div class="verify-detail__evidence">' + escapeHtml(v.evidence_quote) + '</div>';
+          var meta = [];
+          if (v.model) meta.push('Model: ' + v.model);
+          if (v.input_tokens) meta.push('In: ' + v.input_tokens);
+          if (v.output_tokens) meta.push('Out: ' + v.output_tokens);
+          if (v.checked_at) meta.push('Checked: ' + v.checked_at);
+          if (meta.length) detailHtml += '<div class="verify-detail__meta">' + escapeHtml(meta.join('  ·  ')) + '</div>';
+        }
+        detailHtml += '</td>';
+        detailTr.innerHTML = detailHtml;
+        tbody.appendChild(detailTr);
+      }
+    });
+  }
+
+  function updateVerifyProgressBar() {
+    var total = verifyRows.length;
+    var done = verifyRows.filter(function (r) { return !!r.verdict; }).length;
+    var pct = total ? Math.round((done / total) * 100) : 0;
+    var fill = el('verify-progress-fill');
+    var txt = el('verify-progress-text');
+    if (fill) fill.style.width = pct + '%';
+    if (txt) txt.textContent = done + ' / ' + total + ' checked';
+  }
+
+  function exportVerifyCsv() {
+    var rows = applyVerifyFiltersAndSort(verifyRows);
+    var lines = [['index','line','key','reference_title','verdict','confidence','explanation','evidence_quote'].join(',')];
+    rows.forEach(function (r) {
+      var v = r.verdict || {};
+      lines.push([
+        r.index,
+        r.line || '',
+        csvEscape(r.bib_key || ''),
+        csvEscape((r.reference && r.reference.title) || ''),
+        csvEscape(v.verdict || ''),
+        v.confidence != null ? v.confidence : '',
+        csvEscape(v.explanation || ''),
+        csvEscape(v.evidence_quote || ''),
+      ].join(','));
+    });
+    var csv = lines.join('\n');
+    var blob = new Blob([csv], { type: 'text/csv' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'verification.csv';
+    a.click();
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
+  }
+
+  function csvEscape(s) {
+    s = String(s);
+    if (s.indexOf(',') !== -1 || s.indexOf('"') !== -1 || s.indexOf('\n') !== -1) {
+      return '"' + s.replace(/"/g, '""') + '"';
+    }
+    return s;
+  }
 
   /* ----------------------------------------------------------
      Upload logic (project-scoped)
@@ -965,6 +2363,7 @@
         totalRefs = data.total;
         processedCount = 0;
         allResults = [];
+        allParsedRefs = [];
         if (data.warning) uploadWarning.textContent = data.warning;
         progressCount.textContent = '0 / ' + totalRefs;
         progressFill.style.width = '0%';
@@ -1096,6 +2495,235 @@
   }
 
   /* ----------------------------------------------------------
+     Rebuild reference .md files (PDF/HTML/abstract -> .md)
+     ---------------------------------------------------------- */
+  var _buildMdES = null;
+
+  function buildReferenceMd() {
+    if (!currentProjectSlug) return;
+    var btn = el('dash-build-md-btn');
+    var status = el('dash-md-status');
+    var progressBox = el('dash-md-progress');
+    var progressFill = el('dash-md-progress-fill');
+    var progressCount = el('dash-md-progress-count');
+    var progressCurrent = el('dash-md-progress-current');
+    if (!btn) return;
+
+    var origLabel = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Building...';
+    if (status) status.textContent = 'Starting...';
+    if (progressBox) progressBox.style.display = '';
+    if (progressFill) progressFill.style.width = '0%';
+    if (progressCount) progressCount.textContent = '0 / 0';
+    if (progressCurrent) progressCurrent.textContent = '';
+
+    var slug = currentProjectSlug;
+
+    function finish(message, opts) {
+      opts = opts || {};
+      btn.disabled = false;
+      btn.textContent = origLabel;
+      if (status && message) status.textContent = message;
+      if (progressBox && opts.hideProgress) progressBox.style.display = 'none';
+      if (_buildMdES) { try { _buildMdES.close(); } catch (e) {} _buildMdES = null; }
+      if (opts.refresh) {
+        fetch('/api/projects/' + slug)
+          .then(function (r) { return r.json(); })
+          .then(function (proj) { showDashboard(proj); });
+      }
+    }
+
+    fetch('/api/projects/' + slug + '/build-md', { method: 'POST' })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
+      .then(function (res) {
+        if (!res.ok) {
+          finish('Error: ' + ((res.body && res.body.error) || 'failed to start'), { hideProgress: true });
+          return;
+        }
+        var sid = res.body.session_id;
+        var total = res.body.total || 0;
+        if (progressCount) progressCount.textContent = '0 / ' + total;
+        if (status) status.textContent = 'Building 0 / ' + total + '...';
+
+        if (_buildMdES) { try { _buildMdES.close(); } catch (e) {} }
+        _buildMdES = new EventSource('/api/projects/' + slug + '/build-md-stream/' + sid);
+
+        _buildMdES.addEventListener('progress', function (ev) {
+          var d;
+          try { d = JSON.parse(ev.data); } catch (e) { return; }
+          var done = d.index + 1;
+          var t = d.total || total;
+          var pct = t > 0 ? Math.round((done / t) * 100) : 0;
+          if (progressFill) progressFill.style.width = pct + '%';
+          if (progressCount) progressCount.textContent = done + ' / ' + t;
+          // Show the next reference being processed (current), or the last one done
+          var label = d.current ? ('Converting ' + d.current) : (d.bib_key ? ('Done ' + d.bib_key) : '');
+          if (progressCurrent) progressCurrent.textContent = label;
+          if (status) status.textContent = 'Building ' + done + ' / ' + t + '...';
+        });
+
+        _buildMdES.addEventListener('complete', function (ev) {
+          var d = {};
+          try { d = JSON.parse(ev.data); } catch (e) {}
+          if (progressFill) progressFill.style.width = '100%';
+          if (progressFill) progressFill.classList.remove('progress-bar__fill--active');
+          if (progressCurrent) progressCurrent.textContent = '';
+          var msg = 'Built ' + (d.built || 0) + ' / ' + (d.total || 0) +
+                    ' .md files (' + (d.skipped || 0) + ' skipped, ' + (d.errors || 0) + ' errors).';
+          finish(msg, { refresh: true });
+        });
+
+        _buildMdES.onerror = function () {
+          finish('Connection lost — check status by refreshing the page.', { hideProgress: true });
+        };
+      })
+      .catch(function (e) {
+        finish('Error: ' + e.message, { hideProgress: true });
+      });
+  }
+
+  /* ----------------------------------------------------------
+     Reference identity match — batch check from dashboard
+     ---------------------------------------------------------- */
+  var _refMatchES = null;
+
+  function checkAllReferenceMatches() {
+    if (!currentProjectSlug) return;
+    var btn = el('dash-check-refs-match-btn');
+    var progressBox = el('dash-rm-progress');
+    var progressFill = el('dash-rm-progress-fill');
+    var progressCount = el('dash-rm-progress-count');
+    var progressCurrent = el('dash-rm-progress-current');
+    if (!btn) return;
+
+    var origLabel = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Checking...';
+    if (progressBox) progressBox.style.display = '';
+    if (progressFill) {
+      progressFill.style.width = '0%';
+      progressFill.classList.add('progress-bar__fill--active');
+    }
+    if (progressCount) progressCount.textContent = '0 / 0';
+    if (progressCurrent) progressCurrent.textContent = '';
+
+    var slug = currentProjectSlug;
+
+    function finish(message, opts) {
+      opts = opts || {};
+      btn.disabled = false;
+      btn.textContent = origLabel;
+      if (progressBox && opts.hideProgress) progressBox.style.display = 'none';
+      if (_refMatchES) { try { _refMatchES.close(); } catch (e) {} _refMatchES = null; }
+      if (opts.refresh) {
+        fetch('/api/projects/' + slug)
+          .then(function (r) { return r.json(); })
+          .then(function (proj) { showDashboard(proj); });
+      }
+      if (message && progressCurrent) progressCurrent.textContent = message;
+    }
+
+    fetch('/api/projects/' + slug + '/check-references-match', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
+      .then(function (res) {
+        if (!res.ok) {
+          finish('Error: ' + ((res.body && res.body.error) || 'failed to start'), { hideProgress: true });
+          return;
+        }
+        var sid = res.body.session_id;
+        var total = res.body.n_references || 0;
+        if (progressCount) progressCount.textContent = '0 / ' + total;
+
+        if (_refMatchES) { try { _refMatchES.close(); } catch (e) {} }
+        _refMatchES = new EventSource('/api/projects/' + slug + '/ref-match-status/' + sid);
+
+        _refMatchES.addEventListener('progress', function (ev) {
+          var d;
+          try { d = JSON.parse(ev.data); } catch (e) { return; }
+          var done = d.progress || 0;
+          var t = d.total || total;
+          var pct = t > 0 ? Math.round((done / t) * 100) : 0;
+          if (progressFill) progressFill.style.width = pct + '%';
+          if (progressCount) progressCount.textContent = done + ' / ' + t;
+          if (progressCurrent && d.bib_key) progressCurrent.textContent = 'checked ' + d.bib_key;
+          // Update local state so the dashboard breakdown / panels stay in sync
+          if (d.bib_key) {
+            for (var i = 0; i < allResults.length; i++) {
+              if (allResults[i].bib_key === d.bib_key) {
+                allResults[i].ref_match = d.ref_match;
+                break;
+              }
+            }
+          }
+        });
+
+        _refMatchES.addEventListener('complete', function (ev) {
+          var d = {};
+          try { d = JSON.parse(ev.data); } catch (e) {}
+          if (progressFill) {
+            progressFill.style.width = '100%';
+            progressFill.classList.remove('progress-bar__fill--active');
+          }
+          var c = d.counts || {};
+          var msg = (c.matched || 0) + ' matched, ' + (c.not_matched || 0) + ' NOT matched, ' +
+                    ((c.unverifiable || 0) + (c.skipped_no_md || 0)) + ' unverifiable.';
+          finish(msg, { refresh: true });
+        });
+
+        _refMatchES.onerror = function () {
+          finish('Connection lost.', { hideProgress: true });
+        };
+      })
+      .catch(function (e) { finish('Error: ' + e.message, { hideProgress: true }); });
+  }
+
+  /* ----------------------------------------------------------
+     Validity Report — generate + open
+     ---------------------------------------------------------- */
+  function buildValidityReport() {
+    if (!currentProjectSlug) return;
+    var btn = el('dash-validity-report-btn');
+    if (!btn) return;
+    var origLabel = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Building...';
+
+    var slug = currentProjectSlug;
+    fetch('/api/projects/' + slug + '/validity-report', { method: 'POST' })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
+      .then(function (res) {
+        btn.disabled = false;
+        btn.textContent = origLabel;
+        if (!res.ok) {
+          alert('Validity report failed: ' + ((res.body && res.body.error) || 'unknown error'));
+          return;
+        }
+        // Open the report HTML in a new tab. The page also has a "Download
+        // references bundle" link inline so the author can grab the zip.
+        if (res.body.html_url) window.open(res.body.html_url, '_blank', 'noopener');
+      })
+      .catch(function (e) {
+        btn.disabled = false;
+        btn.textContent = origLabel;
+        alert('Validity report failed: ' + e.message);
+      });
+  }
+
+  function downloadReferencesZip() {
+    if (!currentProjectSlug) return;
+    // The endpoint auto-builds the report on demand if the zip isn't present yet,
+    // so a user can grab the references bundle without first clicking Validity Report.
+    // Plain navigation triggers the browser's attachment-download flow.
+    var url = '/api/projects/' + currentProjectSlug + '/validity-report/references-zip';
+    window.location.href = url;
+  }
+
+  /* ----------------------------------------------------------
      Upload new bib into same project
      ---------------------------------------------------------- */
   function newCheck() {
@@ -1136,6 +2764,7 @@
     processingView = el('view-processing');
     resultsView = el('view-results');
     reviewView = el('view-review');
+    verifyView = el('view-verify');
     projectsGrid = el('projects-grid');
     noProjectsMsg = el('no-projects-msg');
     projectNameInput = el('project-name-input');
@@ -1183,6 +2812,7 @@
     reviewTabHtml = el('review-tab-html');
     reviewTabAbstract = el('review-tab-abstract');
     reviewTabBibtex = el('review-tab-bibtex');
+    reviewTabMd = el('review-tab-md');
 
     // Start with projects view
     loadProjects();
@@ -1220,9 +2850,31 @@
         showView('results');
       }
     });
-    el('dash-review-btn').addEventListener('click', function () { openReviewView(); });
+    el('dash-review-btn').addEventListener('click', function () {
+      // Fetch last-viewed citation so we resume at the right position
+      if (currentProjectSlug) {
+        fetch('/api/projects/' + currentProjectSlug + '/last-viewed')
+          .then(function (r) { return r.json(); })
+          .then(function (d) {
+            var resumeIdx = d.citation_index || 0;
+            openReviewView();
+            setTimeout(function () { navigateToCitation(resumeIdx); }, 500);
+          })
+          .catch(function () { openReviewView(); });
+      } else {
+        openReviewView();
+      }
+    });
     el('dash-csv-btn').addEventListener('click', downloadCSV);
     el('dash-pdf-btn').addEventListener('click', downloadPDF);
+    var buildMdBtnEl = el('dash-build-md-btn');
+    if (buildMdBtnEl) buildMdBtnEl.addEventListener('click', buildReferenceMd);
+    var checkRmBtnEl = el('dash-check-refs-match-btn');
+    if (checkRmBtnEl) checkRmBtnEl.addEventListener('click', checkAllReferenceMatches);
+    var validityBtnEl = el('dash-validity-report-btn');
+    if (validityBtnEl) validityBtnEl.addEventListener('click', buildValidityReport);
+    var dlRefsBtnEl = el('dash-download-refs-btn');
+    if (dlRefsBtnEl) dlRefsBtnEl.addEventListener('click', downloadReferencesZip);
 
     // Review view events
     texFileInput.addEventListener('change', function () { if (texFileInput.files[0]) uploadTex(); });
@@ -1230,6 +2882,31 @@
     el('review-save-tex-btn').addEventListener('click', saveTexContent);
 
     // Review: set link + refresh for current citation
+    // --- Source replacement: shared finalize after Set Link / Upload PDF / Paste Content ---
+    function applySourceReplacementResponse(bibKey, data) {
+      if (data.result) {
+        for (var i = 0; i < allResults.length; i++) {
+          if (allResults[i].bib_key === bibKey) { allResults[i] = data.result; break; }
+        }
+        showReferencePanel(bibKey);
+      }
+      if (data.verdicts_cleared) {
+        citations.forEach(function (c, idx) {
+          if (c.bib_key === bibKey) {
+            var ck = citationCacheKeys[idx];
+            var cached = ck ? claimChecks[ck] : null;
+            if (!(cached && cached.manual)) {
+              delete citationCacheKeys[idx];
+            }
+          }
+        });
+        renderVerdictHeader(currentCiteIndex);
+      }
+      // Always refresh the references panel so source-type labels (PDF/HTML/abstract/not found)
+      // pick up the new files, regardless of whether any verdicts were invalidated.
+      renderReferencesPanel();
+    }
+
     reviewSetLinkBtn.addEventListener('click', function () {
       var cite = citations[currentCiteIndex];
       if (!cite || !currentProjectSlug) return;
@@ -1242,16 +2919,61 @@
         body: JSON.stringify({ url: url.trim() }),
       })
         .then(function (r) { return r.json(); })
-        .then(function (data) {
-          if (data.result) {
-            for (var i = 0; i < allResults.length; i++) {
-              if (allResults[i].bib_key === cite.bib_key) { allResults[i] = data.result; break; }
-            }
-            showReferencePanel(cite.bib_key);
-          }
-        })
+        .then(function (data) { applySourceReplacementResponse(cite.bib_key, data); })
         .finally(function () { reviewSetLinkBtn.disabled = false; });
     });
+
+    // Upload PDF: hidden file input triggered by button
+    var uploadPdfBtn = el('review-upload-pdf-btn');
+    var uploadPdfInput = el('review-upload-pdf-input');
+    if (uploadPdfBtn && uploadPdfInput) {
+      uploadPdfBtn.addEventListener('click', function () { uploadPdfInput.click(); });
+      uploadPdfInput.addEventListener('change', function () {
+        var file = uploadPdfInput.files && uploadPdfInput.files[0];
+        if (!file) return;
+        var cite = citations[currentCiteIndex];
+        if (!cite || !currentProjectSlug) return;
+        var origLabel = uploadPdfBtn.textContent;
+        uploadPdfBtn.disabled = true;
+        uploadPdfBtn.textContent = 'Uploading...';
+        var fd = new FormData();
+        fd.append('file', file);
+        fetch('/api/projects/' + currentProjectSlug + '/upload-pdf/' + encodeURIComponent(cite.bib_key), {
+          method: 'POST',
+          body: fd,
+        })
+          .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
+          .then(function (res) {
+            if (!res.ok) {
+              alert('Upload failed: ' + (res.body && res.body.error || 'unknown'));
+              return;
+            }
+            applySourceReplacementResponse(cite.bib_key, res.body);
+          })
+          .catch(function (e) { alert('Upload error: ' + e.message); })
+          .finally(function () {
+            uploadPdfBtn.disabled = false;
+            uploadPdfBtn.textContent = origLabel;
+            uploadPdfInput.value = '';
+          });
+      });
+    }
+
+    // Paste Content: open modal
+    var pasteContentBtn = el('review-paste-content-btn');
+    if (pasteContentBtn) pasteContentBtn.addEventListener('click', function () {
+      var cite = citations[currentCiteIndex];
+      if (!cite) return;
+      openPasteContentModal(cite.bib_key);
+    });
+    var pasteCancelEl = el('paste-content-cancel');
+    if (pasteCancelEl) pasteCancelEl.addEventListener('click', closePasteContentModal);
+    var pasteSubmitEl = el('paste-content-submit');
+    if (pasteSubmitEl) pasteSubmitEl.addEventListener('click', submitPasteContent);
+    var pasteOverlay = document.querySelector('#paste-content-modal .modal__overlay');
+    if (pasteOverlay) pasteOverlay.addEventListener('click', closePasteContentModal);
+    // expose for inner scope
+    window._applySourceReplacementResponse = applySourceReplacementResponse;
 
     reviewRefreshBtn.addEventListener('click', function () {
       var cite = citations[currentCiteIndex];
@@ -1273,6 +2995,7 @@
                       if (allResults[i].bib_key === cite.bib_key) { allResults[i] = data.result; break; }
                     }
                     showReferencePanel(cite.bib_key);
+                    renderReferencesPanel();  // update source label on the left
                   }
                   reviewRefreshBtn.disabled = false;
                   reviewRefreshBtn.textContent = 'Refresh';
@@ -1284,9 +3007,163 @@
     });
     el('review-prev-btn').addEventListener('click', prevCitation);
     el('review-next-btn').addEventListener('click', nextCitation);
+
+    // v4: claim-check toolbar
+    var checkAllBtnEl = el('review-check-all-btn');
+    if (checkAllBtnEl) checkAllBtnEl.addEventListener('click', checkAllCitations);
+    var stopBtnEl = el('review-stop-check-btn');
+    if (stopBtnEl) stopBtnEl.addEventListener('click', stopBatch);
+    var recheckBtnEl = el('review-recheck-btn');
+    if (recheckBtnEl) recheckBtnEl.addEventListener('click', function () { checkSingleCitation(currentCiteIndex, true); });
+    var overrideBtnEl = el('review-override-btn');
+    if (overrideBtnEl) overrideBtnEl.addEventListener('click', function () {
+      showVerdictPicker(currentCiteIndex, overrideBtnEl);
+    });
+
+    // Add Reference button → open modal pre-filled with the missing bib_key
+    var addRefBtnEl = el('review-add-ref-btn');
+    if (addRefBtnEl) addRefBtnEl.addEventListener('click', function () {
+      var key = addRefBtnEl.dataset.bibKey || (citations[currentCiteIndex] && citations[currentCiteIndex].bib_key);
+      if (key) openAddRefModal(key);
+    });
+    // Modal events
+    var addRefCancelEl = el('add-ref-cancel');
+    if (addRefCancelEl) addRefCancelEl.addEventListener('click', closeAddRefModal);
+    var addRefSubmitEl = el('add-ref-submit');
+    if (addRefSubmitEl) addRefSubmitEl.addEventListener('click', submitAddRef);
+    var addRefOverlay = document.querySelector('#add-ref-modal .modal__overlay');
+    if (addRefOverlay) addRefOverlay.addEventListener('click', closeAddRefModal);
+    var checkOneBtnEl = el('review-check-one-btn');
+    if (checkOneBtnEl) checkOneBtnEl.addEventListener('click', function () { checkSingleCitation(currentCiteIndex, false); });
+
+    // v4: references panel — card click (navigate) / verdict-button click (picker)
+    var refsListEl = el('review-refs-list');
+    if (refsListEl) refsListEl.addEventListener('click', function (e) {
+      var verdictBtn = e.target.closest('button[data-act="set-verdict"]');
+      if (verdictBtn) {
+        e.stopPropagation();
+        var vidx = parseInt(verdictBtn.dataset.idx, 10);
+        if (!isNaN(vidx)) showVerdictPicker(vidx, verdictBtn);
+        return;
+      }
+      var card = e.target.closest('.review-ref-card');
+      if (card) {
+        var idx = parseInt(card.dataset.idx, 10);
+        if (!isNaN(idx)) navigateToCitation(idx);
+      }
+    });
+
+    // v4: references panel filters
+    var refsSearchEl = el('review-refs-search');
+    if (refsSearchEl) refsSearchEl.addEventListener('input', function () {
+      refsFilters.search = this.value; renderReferencesPanel();
+    });
+    var refsSortEl = el('review-refs-sort');
+    if (refsSortEl) refsSortEl.addEventListener('change', function () {
+      refsFilters.sort = this.value; renderReferencesPanel();
+    });
+    var refsIssuesEl = el('review-refs-issues-only');
+    if (refsIssuesEl) refsIssuesEl.addEventListener('change', function () {
+      refsFilters.issuesOnly = this.checked; renderReferencesPanel();
+    });
+
+    // v4: Dashboard "Verification Table" button
+    var dashVerifyBtn = el('dash-verify-btn');
+    if (dashVerifyBtn) dashVerifyBtn.addEventListener('click', function () {
+      // Need tex/citations loaded first
+      if (!currentProjectSlug) return;
+      // Load tex content into module state if not already
+      if (!citations.length) {
+        fetch('/api/projects/' + currentProjectSlug + '/tex')
+          .then(function (r) { return r.json(); })
+          .then(function (data) {
+            if (data.error) { alert(data.error); return; }
+            texContent = data.tex_content;
+            citations = data.citations || [];
+            openVerifyView();
+          });
+      } else {
+        openVerifyView();
+      }
+    });
+
+    // v4: Verify view events
+    var verifyBackBtn = el('verify-back-btn');
+    if (verifyBackBtn) verifyBackBtn.addEventListener('click', goToDashboard);
+    var verifyBackReviewBtn = el('verify-back-review-btn');
+    if (verifyBackReviewBtn) verifyBackReviewBtn.addEventListener('click', function (e) {
+      e.preventDefault(); openReviewView();
+    });
+    var verifyRunBtn = el('verify-run-all-btn');
+    if (verifyRunBtn) verifyRunBtn.addEventListener('click', function () {
+      var stopBtnV = el('verify-stop-btn');
+      if (stopBtnV) stopBtnV.style.display = '';
+      checkAllCitations();
+    });
+    var verifyStopBtn = el('verify-stop-btn');
+    if (verifyStopBtn) verifyStopBtn.addEventListener('click', function () {
+      this.style.display = 'none';
+      stopBatch();
+    });
+    var verifySearchEl = el('verify-search');
+    if (verifySearchEl) verifySearchEl.addEventListener('input', function () {
+      verifyFilters.search = this.value; renderVerifyTable();
+    });
+    var verifyFiltersEl = el('verify-filters');
+    if (verifyFiltersEl) verifyFiltersEl.addEventListener('change', function (e) {
+      var t = e.target;
+      if (t.dataset && t.dataset.filter) {
+        verifyFilters[t.dataset.filter] = t.checked;
+        renderVerifyTable();
+      }
+    });
+    var verifyExportBtn = el('verify-export-csv-btn');
+    if (verifyExportBtn) verifyExportBtn.addEventListener('click', exportVerifyCsv);
+
+    // Header click → sort
+    var verifyTable = el('verify-table');
+    if (verifyTable) verifyTable.querySelectorAll('th[data-sort]').forEach(function (th) {
+      th.addEventListener('click', function () {
+        var col = th.dataset.sort;
+        if (verifySort.col === col) verifySort.dir = verifySort.dir === 'asc' ? 'desc' : 'asc';
+        else { verifySort.col = col; verifySort.dir = 'asc'; }
+        renderVerifyTable();
+      });
+    });
+
+    // Row clicks → action handlers
+    var verifyTbody = el('verify-tbody');
+    if (verifyTbody) verifyTbody.addEventListener('click', function (e) {
+      var btn = e.target.closest('button[data-act]');
+      if (btn) {
+        var tr = btn.closest('tr');
+        var idx = parseInt(tr.dataset.index, 10);
+        if (isNaN(idx)) return;
+        var act = btn.dataset.act;
+        if (act === 'check') {
+          checkSingleCitation(idx, true).then(function () { refreshVerifyData(); });
+        } else if (act === 'open') {
+          // Open the review view at this citation
+          openReviewView();
+          setTimeout(function () { navigateToCitation(idx); }, 400);
+        } else if (act === 'expand') {
+          verifyExpanded[idx] = !verifyExpanded[idx];
+          renderVerifyTable();
+        }
+        e.stopPropagation();
+        return;
+      }
+      // Row click also toggles expand
+      var rowTr = e.target.closest('tr.verify-row');
+      if (rowTr) {
+        var ridx = parseInt(rowTr.dataset.index, 10);
+        if (!isNaN(ridx)) { verifyExpanded[ridx] = !verifyExpanded[ridx]; renderVerifyTable(); }
+      }
+    });
     reviewTabPdf.addEventListener('click', function () { if (!this.disabled) switchTab('pdf'); });
     reviewTabHtml.addEventListener('click', function () { if (!this.disabled) switchTab('html'); });
     reviewTabAbstract.addEventListener('click', function () { if (!this.disabled) switchTab('abstract'); });
+    if (reviewTabMd) reviewTabMd.addEventListener('click', function () { if (!this.disabled) switchTab('md'); });
     reviewTabBibtex.addEventListener('click', function () { if (!this.disabled) switchTab('bibtex'); });
 
     // Keyboard navigation for review view
