@@ -423,73 +423,148 @@ def _playwright_enabled():
 
 
 def _tier_playwright(ctx: FetchContext) -> FetchResult:
+    """Real Chromium fetch. Each call owns its own sync_playwright lifecycle —
+    Playwright's sync API is thread-bound and the long-lived BrowserPool
+    failed with 'cannot switch to a different thread' across Flask refresh
+    workers. Per-call setup adds ~1-2s but this tier is off the hot path."""
     if not _playwright_enabled():
         return FetchResult(ok=False, kind="disabled", detail="playwright disabled in settings")
     if not ctx.url:
         return FetchResult(ok=False, kind="no_match", detail="no url")
     try:
-        from browser_pool import BrowserPool
+        from playwright.sync_api import sync_playwright
     except ImportError:
         return FetchResult(ok=False, kind="not_installed",
                            detail="playwright not installed")
     from config import get_settings
     s = get_settings().get("download") or {}
-    pool_size = int(s.get("playwright_pool_size", 1))
     timeout = int(s.get("playwright_timeout_s", 30))
     html_to_pdf = bool(s.get("playwright_html_to_pdf", True))
 
-    pool = BrowserPool.instance(size=pool_size)
-    if pool is None:
-        return FetchResult(ok=False, kind="not_installed",
-                           detail="playwright runtime not available")
     t0 = time.monotonic()
-    browser = pool.acquire(timeout=60)
-    if browser is None:
-        return FetchResult(ok=False, kind="network", detail="pool acquire timeout",
-                           elapsed_ms=int((time.monotonic() - t0) * 1000))
     try:
-        import threading as _t
-        ctx_pw = browser.new_context(accept_downloads=True)
-        page = ctx_pw.new_page()
-        try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
             try:
-                with page.expect_download(timeout=timeout * 1000) as dl_info:
+                ctx_pw = browser.new_context(accept_downloads=True)
+                try:
+                    page = ctx_pw.new_page()
                     try:
-                        page.goto(ctx.url, wait_until="commit", timeout=timeout * 1000)
+                        with page.expect_download(timeout=timeout * 1000) as dl_info:
+                            try:
+                                page.goto(ctx.url, wait_until="commit", timeout=timeout * 1000)
+                            except Exception:
+                                pass
+                        dl_info.value.save_as(ctx.target_path)
+                        with open(ctx.target_path, "rb") as f:
+                            head = f.read(8)
+                        if not validate_pdf_head(head):
+                            raise RuntimeError("downloaded content is not a PDF")
+                        return FetchResult(ok=True, final_url=ctx.url, http_status=200,
+                                            elapsed_ms=int((time.monotonic() - t0) * 1000))
                     except Exception:
-                        pass
-                dl_info.value.save_as(ctx.target_path)
-                # Validate what landed
-                with open(ctx.target_path, "rb") as f:
-                    head = f.read(8)
-                if not validate_pdf_head(head):
-                    raise RuntimeError("downloaded content is not a PDF")
-                return FetchResult(ok=True, final_url=ctx.url, http_status=200,
-                                    elapsed_ms=int((time.monotonic() - t0) * 1000))
-            except Exception:
-                # No download fired — the page rendered HTML inline.
-                # Convert to PDF as a last resort so downstream extraction still works.
-                if not html_to_pdf:
-                    raise
-                page.goto(ctx.url, wait_until="networkidle", timeout=timeout * 1000)
-                pdf_bytes = page.pdf(format="A4", print_background=True)
-                if not validate_pdf_head(pdf_bytes):
-                    raise RuntimeError("page.pdf() did not produce a PDF")
-                tmp = ctx.target_path + ".partial"
-                with open(tmp, "wb") as f:
-                    f.write(pdf_bytes)
-                os.replace(tmp, ctx.target_path)
-                return FetchResult(ok=True, final_url=ctx.url, http_status=200,
-                                    elapsed_ms=int((time.monotonic() - t0) * 1000))
-        finally:
-            try: ctx_pw.close()
-            except Exception: pass
+                        # No download fired — page rendered HTML inline. Convert
+                        # to PDF so downstream extraction still works.
+                        if not html_to_pdf:
+                            raise
+                        page.goto(ctx.url, wait_until="networkidle", timeout=timeout * 1000)
+                        # Validate the rendered page actually has content before
+                        # producing a PDF. Handle.net redirects and landing-page
+                        # spinners produce ~700-byte "valid PDF magic bytes"
+                        # files that are useless (regression: wooldridge1995).
+                        try:
+                            visible_text = page.evaluate("document.body.innerText") or ""
+                        except Exception:
+                            visible_text = ""
+                        if len(visible_text.strip()) < 500:
+                            return FetchResult(
+                                ok=False, kind="validation",
+                                detail=f"rendered page too sparse ({len(visible_text)} chars text); deferring to next tier",
+                                elapsed_ms=int((time.monotonic() - t0) * 1000))
+                        pdf_bytes = page.pdf(format="A4", print_background=True)
+                        if not validate_pdf_head(pdf_bytes):
+                            raise RuntimeError("page.pdf() did not produce a PDF")
+                        # Belt-and-suspenders size guard: even on a non-empty
+                        # page Chromium occasionally emits a tiny PDF (CSS
+                        # display:none body, etc.). Real academic-paper renders
+                        # are always >5KB.
+                        if len(pdf_bytes) < 5000:
+                            return FetchResult(
+                                ok=False, kind="validation",
+                                detail=f"rendered PDF too small ({len(pdf_bytes)} bytes); deferring to next tier",
+                                elapsed_ms=int((time.monotonic() - t0) * 1000))
+                        tmp = ctx.target_path + ".partial"
+                        with open(tmp, "wb") as f:
+                            f.write(pdf_bytes)
+                        os.replace(tmp, ctx.target_path)
+                        return FetchResult(ok=True, final_url=ctx.url, http_status=200,
+                                            elapsed_ms=int((time.monotonic() - t0) * 1000))
+                finally:
+                    try: ctx_pw.close()
+                    except Exception: pass
+            finally:
+                try: browser.close()
+                except Exception: pass
     except Exception as e:
         return FetchResult(ok=False, kind="network", detail=f"playwright: {e}",
                            elapsed_ms=int((time.monotonic() - t0) * 1000))
-    finally:
-        try: pool.release(browser)
-        except Exception: pass
+
+
+# ============================================================
+# Tier: google_rescue (last-ditch — title-search a non-fragile mirror)
+# ============================================================
+# When every URL we know about (primary + OA fallbacks + DOI negotiation +
+# Wayback + WAF defeats) has failed, run Google Custom Search by title to
+# discover an unknown mirror — university course pages, author homepages,
+# institutional repositories. Especially effective for textbooks and
+# pre-2010 papers where OpenAlex/Unpaywall don't track the real OA copy.
+
+def _tier_google_rescue(ctx: FetchContext) -> FetchResult:
+    title = ctx.title or (ctx.result or {}).get("title") or (ctx.ref or {}).get("title")
+    if not title:
+        return FetchResult(ok=False, kind="no_match", detail="no title")
+    t0 = time.monotonic()
+    try:
+        from api_clients.google_search import lookup_google_search, _extract_doc_id
+        from download_rules import is_fragile
+    except Exception as e:
+        return FetchResult(ok=False, kind="not_installed", detail=str(e),
+                           elapsed_ms=int((time.monotonic() - t0) * 1000))
+    # Prefer bib authors over result.authors — the latter may have been
+    # polluted by an API match-drift (e.g. S2 matched a different "3rd Edition"
+    # entry with unrelated authors). Bib authors are ground truth.
+    authors = ((ctx.ref or {}).get("authors")
+               or (ctx.result or {}).get("authors"))
+    all_fields = (ctx.ref or {}).get("all_fields") or {}
+    doc_id = _extract_doc_id(
+        number_field=all_fields.get("number"),
+        note_field=all_fields.get("note"),
+        title=title,
+    )
+    gs = lookup_google_search(title, doi=ctx.doi, authors=authors, doc_id=doc_id)
+    if not gs or not gs.get("pdf_url"):
+        return FetchResult(ok=False, kind="no_match",
+                           detail="no pdf candidate from Google",
+                           elapsed_ms=int((time.monotonic() - t0) * 1000))
+    pdf_url = gs["pdf_url"]
+    # Skip URLs we've already tried earlier in the chain.
+    primary_key = _dedup_key(ctx.url)
+    fallbacks = [_dedup_key(u) for u in (ctx.result.get("pdf_url_fallbacks") or [])]
+    if _dedup_key(pdf_url) in {primary_key, *fallbacks}:
+        return FetchResult(ok=False, kind="no_match",
+                           detail="google pick already tried",
+                           elapsed_ms=int((time.monotonic() - t0) * 1000))
+    # Skip fragile publishers — Google ranks them but they bot-block on download
+    # (and we already exhausted the publisher path via direct + curl_cffi).
+    if is_fragile(pdf_url):
+        return FetchResult(ok=False, kind="no_match",
+                           detail=f"google pick is fragile host: {pdf_url}",
+                           elapsed_ms=int((time.monotonic() - t0) * 1000))
+    headers = ctx.headers_fn(pdf_url) if ctx.headers_fn else {}
+    res = _fetch_pdf(pdf_url, ctx.target_path, headers=headers, timeout=ctx.timeout_s)
+    res.final_url = res.final_url or pdf_url
+    res.elapsed_ms = int((time.monotonic() - t0) * 1000)
+    return res
 
 
 # ============================================================
@@ -507,6 +582,7 @@ DEFAULT_PDF_TIERS = [
     ("wayback",         "_tier_wayback"),
     ("curl_cffi",       "_tier_curl_cffi"),     # Phase B — opt-in, no-ops if disabled
     ("playwright",      "_tier_playwright"),    # Phase C — opt-in, no-ops if disabled
+    ("google_rescue",   "_tier_google_rescue"),  # last-ditch: title-search an unknown mirror
 ]
 
 

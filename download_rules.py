@@ -45,7 +45,12 @@ Extending:
 #   - api_clients.google_search._is_fragile_pdf_url (skip fragile results)
 FRAGILE_PDF_DOMAINS = (
     "onlinelibrary.wiley.com",
-    "papers.ssrn.com",
+    # papers.ssrn.com — REMOVED 2026-04-19. SSRN's bot-blocking is sporadic
+    # rather than absolute, and many finance / econ refs (Wiley/JF DOIs) only
+    # have an OA copy on SSRN. Treating it as fragile meant Google rescue and
+    # the Google search parser silently skipped SSRN PDFs even when they would
+    # have downloaded fine. If SSRN starts hard-blocking, restore here AND
+    # surface a curl_cffi suggestion in compute_download_stats.
     "econstor.eu",
     "sciencedirect.com",
     "link.springer.com",
@@ -65,12 +70,42 @@ NONCONTENT_DOMAINS = (
 )
 
 
+# Hosts that serve a JS challenge / interstitial (non-200 status, JS redirect
+# in the body) on cold anonymous fetches. Plain `requests.get` can't follow
+# them — we route the bib URL pre-fetch (and the PDF tier orchestrator) to
+# Playwright, which executes the challenge.
+#
+# An EUR-Lex 202 response is the canonical example: body is a small JS shim
+# that redirects to the rendered content after a captcha-equivalent.
+JS_CHALLENGE_HOSTS = (
+    "eur-lex.europa.eu",
+    "europa.eu",          # broader EU domain — same WAF
+    "elsevier.com",
+    "sciencedirect.com",  # Elsevier subdomain
+)
+
+
 def is_fragile(url):
     """True if the URL is on a bot-blocked publisher domain (host suffix match)."""
     if not url:
         return False
     u = url.lower()
     return any(d in u for d in FRAGILE_PDF_DOMAINS)
+
+
+def is_js_challenge(url):
+    """True if the URL is on a known JS-challenge host (host suffix match).
+
+    Used by file_downloader._download_page / _download_pdf to skip the doomed
+    direct attempt and go straight to Playwright."""
+    if not url:
+        return False
+    try:
+        from urllib.parse import urlparse
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return False
+    return any(host == d or host.endswith("." + d) for d in JS_CHALLENGE_HOSTS)
 
 
 def is_noncontent(url):
@@ -235,6 +270,18 @@ BUILTIN_RULES = {
     "researchgate.net": {
         "force_tier": "curl_cffi",
         "notes": "bot-blocked; needs TLS impersonation + session",
+    },
+
+    # JS-challenge hosts: response status is non-200 (often 202) with a JS
+    # redirect body that plain requests can't follow. Playwright executes
+    # the JS and returns the rendered page.
+    "eur-lex.europa.eu": {
+        "force_tier": "playwright",
+        "notes": "EUR-Lex serves HTTP 202 + JS interstitial on cold fetches",
+    },
+    "elsevier.com": {
+        "force_tier": "playwright",
+        "notes": "Elsevier portal — JS-rendered SPA",
     },
 }
 

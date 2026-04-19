@@ -100,3 +100,36 @@ def test_download_nonexistent_session():
     client = app.test_client()
     resp = client.get("/download/nonexistent/csv")
     assert resp.status_code == 404
+
+
+class TestWipeReferenceArtifacts:
+    """Refresh = start clean. Stale wrong-paper PDF/abstract/md from a prior
+    API false-match (CitadelSecuritiesWhatWeDo → Hokkaido photocatalysis paper)
+    must be removed before re-fetch, else ref_match keeps reading the old PDF
+    and reports the wrong paper indefinitely."""
+
+    def test_wipes_all_artifact_suffixes(self, tmp_path):
+        from app import _wipe_reference_artifacts
+        import os
+        for suffix in ("_pdf.pdf", "_abstract.txt", "_page.html",
+                       "_pasted.md", ".md"):
+            (tmp_path / f"k{suffix}").write_bytes(b"x")
+        _wipe_reference_artifacts(str(tmp_path), "k")
+        for suffix in ("_pdf.pdf", "_abstract.txt", "_page.html",
+                       "_pasted.md", ".md"):
+            assert not os.path.exists(tmp_path / f"k{suffix}"), \
+                f"k{suffix} should have been wiped"
+
+    def test_leaves_unrelated_bib_keys_alone(self, tmp_path):
+        from app import _wipe_reference_artifacts
+        import os
+        (tmp_path / "k_pdf.pdf").write_bytes(b"target")
+        (tmp_path / "other_pdf.pdf").write_bytes(b"keeper")
+        _wipe_reference_artifacts(str(tmp_path), "k")
+        assert not os.path.exists(tmp_path / "k_pdf.pdf")
+        assert os.path.exists(tmp_path / "other_pdf.pdf")
+
+    def test_safe_when_no_files_exist(self, tmp_path):
+        from app import _wipe_reference_artifacts
+        # Should not raise
+        _wipe_reference_artifacts(str(tmp_path), "no-such-key")

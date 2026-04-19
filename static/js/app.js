@@ -93,7 +93,19 @@
   /* ----------------------------------------------------------
      Status helpers
      ---------------------------------------------------------- */
-  function statusIcon(status) {
+  // bib_url_unreachable splits into two user-visible flavors based on the
+  // failure kind: a generic "Broken URL" (4xx/5xx/dead) and a distinct
+  // "Bot-Blocked" variant for sites whose Cloudflare/WAF challenge blocked
+  // even our heaviest fallback (Playwright). The latter needs a different
+  // call to action: paste the content manually rather than fix the URL.
+  function _isBotBlocked(result) {
+    if (!result || result.status !== 'bib_url_unreachable') return false;
+    var f = result.bib_url_failure || {};
+    return f.kind === 'bot_blocked' || f.kind === 'js_challenge';
+  }
+
+  function statusIcon(result) {
+    var status = (result && typeof result === 'object') ? result.status : result;
     switch (status) {
       case 'found_pdf':
         return '<span class="result-card__status-icon result-card__status-icon--found_pdf" aria-label="Found with PDF">' + SVG.checkCircle + '</span>';
@@ -102,6 +114,9 @@
       case 'found_web_page':
         return '<span class="result-card__status-icon result-card__status-icon--found_web_page" aria-label="Web page found">' + SVG.externalLink + '</span>';
       case 'bib_url_unreachable':
+        if (_isBotBlocked(result)) {
+          return '<span class="result-card__status-icon result-card__status-icon--bot_blocked" aria-label="Bot-Blocked">' + SVG.xCircle + '</span>';
+        }
         return '<span class="result-card__status-icon result-card__status-icon--bib_url_unreachable" aria-label="Broken URL">' + SVG.xCircle + '</span>';
       case 'not_found':
         return '<span class="result-card__status-icon result-card__status-icon--not_found" aria-label="Not found">' + SVG.xCircle + '</span>';
@@ -110,19 +125,25 @@
     }
   }
 
-  function statusLabel(status) {
+  function statusLabel(result) {
+    var status = (result && typeof result === 'object') ? result.status : result;
     switch (status) {
       case 'found_pdf': return 'PDF Available';
       case 'found_abstract': return 'Abstract Only';
       case 'found_web_page': return 'Web Page';
-      case 'bib_url_unreachable': return 'Broken URL — fix the citation';
+      case 'bib_url_unreachable':
+        return _isBotBlocked(result) ? 'BOT-BLOCKED — paste content manually'
+                                      : 'Broken URL — fix the citation';
       case 'not_found': return 'Not Found';
       default: return 'Error';
     }
   }
 
-  function statusBadge(status) {
-    var cssClass = 'status-badge status-badge--' + (status || 'error');
+  function statusBadge(result) {
+    var status = (result && typeof result === 'object') ? result.status : result;
+    var modifier = status || 'error';
+    if (status === 'bib_url_unreachable' && _isBotBlocked(result)) modifier = 'bot_blocked';
+    var cssClass = 'status-badge status-badge--' + modifier;
     var icon = '';
     switch (status) {
       case 'found_pdf': icon = SVG.checkCircle; break;
@@ -131,7 +152,7 @@
       case 'bib_url_unreachable': icon = SVG.xCircle; break;
       default: icon = SVG.xCircle; break;
     }
-    return '<span class="' + cssClass + '">' + icon + ' ' + escapeHtml(statusLabel(status)) + '</span>';
+    return '<span class="' + cssClass + '">' + icon + ' ' + escapeHtml(statusLabel(result)) + '</span>';
   }
 
   /* ----------------------------------------------------------
@@ -686,7 +707,7 @@
 
     // Header row: icon + title
     html += '<div class="result-card__header">';
-    html += statusIcon(result.status);
+    html += statusIcon(result);
     html += '<h3 class="result-card__title">' + escapeHtml(result.title || result.bib_key || 'Untitled') + '</h3>';
     html += '</div>';
 
@@ -701,7 +722,7 @@
 
     // Badges
     html += '<div class="result-card__badges">';
-    html += statusBadge(result.status);
+    html += statusBadge(result);
     var rmBadge = _matchSummary(result.ref_match);
     html += '<span class="status-badge status-badge--match-' + rmBadge.cls + '" title="' +
             escapeHtml(rmBadge.title) + '">Match ' + escapeHtml(rmBadge.label) + '</span>';
@@ -1215,20 +1236,29 @@
     var isBrokenUrl = ref.status === 'bib_url_unreachable';
     if (brokenWarn) {
       if (isBrokenUrl) {
-        var msg = '<strong>Broken bib URL — fix the citation.</strong> ';
+        var botBlocked = _isBotBlocked(ref);
+        var heading = botBlocked
+          ? '<strong>BOT-BLOCKED — site refused automated download.</strong> '
+          : '<strong>Broken bib URL — fix the citation.</strong> ';
+        var msg = heading;
         msg += escapeHtml(ref.error || 'The URL in this bib entry could not be downloaded.');
         if (ref.url) {
           msg += '<br><span class="review-broken-url-warning__url">URL: <a href="' +
                  escapeHtml(ref.url) + '" target="_blank" rel="noopener noreferrer">' +
                  escapeHtml(ref.url) + '</a></span>';
         }
-        msg += '<br><span class="review-broken-url-warning__hint">Use <strong>Set Link</strong>, ' +
-               '<strong>Upload PDF</strong>, or <strong>Paste Content</strong> in this panel ' +
-               'to provide a working source.</span>';
+        var hint = botBlocked
+          ? 'The site uses Cloudflare/WAF protection that defeats automated download. ' +
+            'Open the URL in a browser, copy the article text, and use <strong>Paste Content</strong> below.'
+          : 'Use <strong>Set Link</strong>, <strong>Upload PDF</strong>, or ' +
+            '<strong>Paste Content</strong> in this panel to provide a working source.';
+        msg += '<br><span class="review-broken-url-warning__hint">' + hint + '</span>';
         brokenWarn.innerHTML = msg;
+        brokenWarn.classList.toggle('review-broken-url-warning--bot-blocked', botBlocked);
         brokenWarn.style.display = 'block';
       } else {
         brokenWarn.style.display = 'none';
+        brokenWarn.classList.remove('review-broken-url-warning--bot-blocked');
       }
     }
 
@@ -2836,12 +2866,12 @@
       });
   }
 
-  function downloadReferencesZip() {
+  function downloadReportZip() {
     if (!currentProjectSlug) return;
-    // The endpoint auto-builds the report on demand if the zip isn't present yet,
-    // so a user can grab the references bundle without first clicking Validity Report.
+    // The endpoint auto-builds the report bundle on demand (HTML + references/),
+    // so the user can grab everything in one ZIP without first clicking Validity Report.
     // Plain navigation triggers the browser's attachment-download flow.
-    var url = '/api/projects/' + currentProjectSlug + '/validity-report/references-zip';
+    var url = '/api/projects/' + currentProjectSlug + '/validity-report/report-zip';
     window.location.href = url;
   }
 
@@ -2996,7 +3026,7 @@
     var validityBtnEl = el('dash-validity-report-btn');
     if (validityBtnEl) validityBtnEl.addEventListener('click', buildValidityReport);
     var dlRefsBtnEl = el('dash-download-refs-btn');
-    if (dlRefsBtnEl) dlRefsBtnEl.addEventListener('click', downloadReferencesZip);
+    if (dlRefsBtnEl) dlRefsBtnEl.addEventListener('click', downloadReportZip);
 
     // Review view events
     texFileInput.addEventListener('change', function () { if (texFileInput.files[0]) uploadTex(); });

@@ -170,14 +170,161 @@ class TestTier0StampsDirect:
         result = {"bib_key": "k", "pdf_url": "https://example.com/x.pdf",
                   "url": None, "abstract": None}
         fail = FetchResult(ok=False, kind="http_4xx", http_status=403)
-        # Mock EVERY tier so none stamp provenance
+        # Mock EVERY tier so none stamp provenance — including the heavy
+        # tiers (curl_cffi/playwright) which now run because settings enable them.
         with patch.object(fdf, "_tier_direct", return_value=fail), \
              patch.object(fdf, "_tier_oa_fallbacks", return_value=fail), \
              patch.object(fdf, "_tier_doi_negotiation", return_value=fail), \
              patch.object(fdf, "_tier_openreview", return_value=fail), \
-             patch.object(fdf, "_tier_wayback", return_value=fail):
+             patch.object(fdf, "_tier_wayback", return_value=fail), \
+             patch.object(fdf, "_tier_curl_cffi", return_value=fail), \
+             patch.object(fdf, "_tier_playwright", return_value=fail), \
+             patch.object(fdf, "_tier_google_rescue", return_value=fail):
             download_reference_files(str(tmp_path), "k", result)
         assert get_origin(result, "pdf") is None
+
+
+class TestUrlSourceOnlyBlocksOrchestrator:
+    """Regression: CitadelSecuritiesWhatWeDo. When a non-DOI bib URL provides
+    the source via make_url_source_result, the PDF tier orchestrator MUST NOT
+    run — title-search tiers (openreview, google_rescue) will find unrelated
+    papers ("What We Do" → "What We Do Not Fund"). Only the bib URL counts."""
+
+    def test_url_source_only_skips_orchestrator(self, tmp_path):
+        from file_downloader import download_reference_files
+        import file_downloader_fallback as fdf
+        from file_downloader_fallback import FetchResult
+        result = {
+            "bib_key": "k", "title": "What We Do",
+            "pdf_url": None, "url": "https://citadelsecurities.com/what-we-do/",
+            "abstract": None, "url_source_only": True,
+            "files_origin": {},
+        }
+        # Pre-fetch already saved the page; download_reference_files would
+        # otherwise hit the orchestrator because title is present.
+        (tmp_path / "k_page.html").write_text("<html>real content</html>",
+                                               encoding="utf-8")
+        with patch.object(fdf, "_tier_direct") as direct, \
+             patch.object(fdf, "_tier_oa_fallbacks") as oa, \
+             patch.object(fdf, "_tier_openreview") as opr, \
+             patch.object(fdf, "_tier_google_rescue") as gr:
+            files = download_reference_files(str(tmp_path), "k", result)
+        # NONE of the orchestrator tiers should have been touched
+        direct.assert_not_called()
+        oa.assert_not_called()
+        opr.assert_not_called()
+        gr.assert_not_called()
+        # And no rogue PDF should have been written
+        assert "pdf" not in files
+
+    def test_normal_result_still_runs_orchestrator(self, tmp_path):
+        """Without url_source_only, the orchestrator runs as before."""
+        from file_downloader import download_reference_files
+        import file_downloader_fallback as fdf
+        from file_downloader_fallback import FetchResult
+        result = {
+            "bib_key": "k", "title": "Some Paper",
+            "pdf_url": "https://example.com/x.pdf",
+            "url": None, "abstract": None,
+            "files_origin": {},
+        }
+        called = {}
+        def fake_direct(ctx):
+            called["direct"] = True
+            with open(ctx.target_path, "wb") as f:
+                f.write(b"%PDF-1.4 body")
+            return FetchResult(ok=True, final_url=ctx.url, http_status=200, elapsed_ms=10)
+        with patch.object(fdf, "_tier_direct", side_effect=fake_direct):
+            download_reference_files(str(tmp_path), "k", result)
+        assert called.get("direct") is True
+
+    def test_url_source_only_with_pdf_bib_url_keeps_existing_pdf(self, tmp_path):
+        """When bib URL was a .pdf and pre-fetch downloaded it, the file is
+        already on disk — pick it up without re-fetching or searching."""
+        from file_downloader import download_reference_files
+        import file_downloader_fallback as fdf
+        result = {
+            "bib_key": "k", "title": "T",
+            "pdf_url": "https://example.com/paper.pdf",
+            "url": "https://example.com/paper.pdf",
+            "abstract": None, "url_source_only": True,
+            "files_origin": {},
+        }
+        (tmp_path / "k_pdf.pdf").write_bytes(b"%PDF-1.4 pre-fetched")
+        with patch.object(fdf, "_tier_direct") as direct:
+            files = download_reference_files(str(tmp_path), "k", result)
+        direct.assert_not_called()
+        assert files.get("pdf") == "k_pdf.pdf"
+
+
+class TestStatusDowngradeWhenNoPdfLanded:
+    """Regression: russell2020artificial. lookup_engine sets status=found_pdf
+    as soon as a candidate pdf_url exists, but a candidate is not the same as a
+    downloaded file. When every tier failed, the UI must NOT claim found_pdf."""
+
+    def test_downgrade_to_found_abstract(self, tmp_path):
+        from file_downloader import download_reference_files
+        import file_downloader_fallback as fdf
+        from file_downloader_fallback import FetchResult
+        result = {
+            "bib_key": "k", "title": "T",
+            "pdf_url": "https://dead.example.com/x.pdf",
+            "url": None, "abstract": "An abstract paragraph.",
+            "status": "found_pdf",  # set by lookup_engine on candidate URL
+        }
+        fail = FetchResult(ok=False, kind="http_4xx", http_status=404)
+        with patch.object(fdf, "_tier_direct", return_value=fail), \
+             patch.object(fdf, "_tier_oa_fallbacks", return_value=fail), \
+             patch.object(fdf, "_tier_doi_negotiation", return_value=fail), \
+             patch.object(fdf, "_tier_openreview", return_value=fail), \
+             patch.object(fdf, "_tier_wayback", return_value=fail), \
+             patch.object(fdf, "_tier_curl_cffi", return_value=fail), \
+             patch.object(fdf, "_tier_playwright", return_value=fail), \
+             patch.object(fdf, "_tier_google_rescue", return_value=fail):
+            download_reference_files(str(tmp_path), "k", result)
+        assert result["status"] == "found_abstract"
+
+    def test_downgrade_to_found_web_page(self, tmp_path):
+        from file_downloader import download_reference_files
+        import file_downloader_fallback as fdf
+        from file_downloader_fallback import FetchResult
+        result = {
+            "bib_key": "k", "title": "T",
+            "pdf_url": "https://dead.example.com/x.pdf",
+            "url": "https://landing.example.com/page",
+            "abstract": None,
+            "status": "found_pdf",
+        }
+        fail = FetchResult(ok=False, kind="http_4xx", http_status=404)
+        with patch.object(fdf, "_tier_direct", return_value=fail), \
+             patch.object(fdf, "_tier_oa_fallbacks", return_value=fail), \
+             patch.object(fdf, "_tier_doi_negotiation", return_value=fail), \
+             patch.object(fdf, "_tier_openreview", return_value=fail), \
+             patch.object(fdf, "_tier_wayback", return_value=fail), \
+             patch.object(fdf, "_tier_curl_cffi", return_value=fail), \
+             patch.object(fdf, "_tier_playwright", return_value=fail), \
+             patch.object(fdf, "_tier_google_rescue", return_value=fail), \
+             patch("file_downloader._download_page", return_value=True):
+            download_reference_files(str(tmp_path), "k", result)
+        assert result["status"] == "found_web_page"
+
+    def test_no_downgrade_when_pdf_actually_landed(self, tmp_path):
+        from file_downloader import download_reference_files
+        import file_downloader_fallback as fdf
+        from file_downloader_fallback import FetchResult
+        result = {
+            "bib_key": "k", "title": "T",
+            "pdf_url": "https://example.com/x.pdf",
+            "url": None, "abstract": None,
+            "status": "found_pdf",
+        }
+        def fake_direct(ctx):
+            with open(ctx.target_path, "wb") as f:
+                f.write(b"%PDF-1.4 body")
+            return FetchResult(ok=True, final_url=ctx.url, http_status=200, elapsed_ms=50)
+        with patch.object(fdf, "_tier_direct", side_effect=fake_direct):
+            download_reference_files(str(tmp_path), "k", result)
+        assert result["status"] == "found_pdf"
 
 
 class TestManualSourceReplacementTags:

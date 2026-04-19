@@ -400,6 +400,10 @@ h1, h2, h3, h4 {
   color: #B45309; /* amber-700 — distinct from "not found" red, signals "fixable" */
 }
 
+.result-card__status-icon--bot_blocked {
+  color: #6D28D9; /* violet-700 — distinct from amber "broken" and red "not found" */
+}
+
 .result-card__title {
   font-family: var(--font-heading);
   font-size: 1.15rem;
@@ -467,6 +471,13 @@ h1, h2, h3, h4 {
 .status-badge--bib_url_unreachable {
   background: #FEF3C7; /* amber background — broken but fixable */
   color: #B45309;
+}
+
+.status-badge--bot_blocked {
+  background: #EDE9FE; /* violet-100 — distinct from amber "broken" */
+  color: #6D28D9;
+  font-weight: 600;
+  letter-spacing: 0.02em;
 }
 
 .status-badge--error {
@@ -1531,6 +1542,18 @@ h1, h2, h3, h4 {
 .review-broken-url-warning a { color: #991b1b; text-decoration: underline; word-break: break-all; }
 .review-broken-url-warning__url { display: inline-block; margin-top: 0.3rem; font-size: 0.78rem; }
 .review-broken-url-warning__hint { display: inline-block; margin-top: 0.4rem; font-size: 0.76rem; color: #991b1b; }
+
+/* Bot-blocked variant — distinct violet palette so the user recognizes
+   it as a different problem from a generically broken URL (the URL works
+   in a browser; only automated download is blocked). */
+.review-broken-url-warning--bot-blocked {
+  background: #ede9fe;
+  color: #4c1d95;
+  border-left-color: #6d28d9;
+}
+.review-broken-url-warning--bot-blocked strong { color: #4c1d95; }
+.review-broken-url-warning--bot-blocked a { color: #6d28d9; }
+.review-broken-url-warning--bot-blocked .review-broken-url-warning__hint { color: #5b21b6; }
 .review-ref-card__title {
   color: #555;
   white-space: nowrap;

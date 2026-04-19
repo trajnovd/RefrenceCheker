@@ -6,8 +6,9 @@ import os
 from datetime import datetime
 from flask import Flask, request, jsonify, Response, render_template, send_from_directory
 from session_store import SessionStore
-from bib_parser import parse_bib_file
-from lookup_engine import process_all, process_reference, make_bib_url_unreachable_result
+from bib_parser import parse_bib_file, extract_doi_from_url
+from provenance import record_origin
+from lookup_engine import process_all, process_reference, make_bib_url_unreachable_result, make_url_source_result
 from report_exporter import export_csv, export_pdf
 from file_downloader import download_reference_files
 from tex_parser import parse_tex_citations
@@ -97,6 +98,26 @@ def _maybe_auto_check_ref_match(slug, bib_key, previous_tier=None):
             logger.debug("auto ref-match for %s/%s failed: %s", slug, bib_key, e)
 
     threading.Thread(target=_run, daemon=True).start()
+
+
+def _stamp_pre_download_provenance(result, pre):
+    """Record file_origin for an artifact downloaded by pre_download_bib_url.
+
+    `pre` is the dict returned by pre_download_bib_url on success, carrying
+    `tier` (direct/curl_cffi/playwright/wayback), `url`, and (for Wayback)
+    `captured_at`. Without this stamp the UI defaults to "direct" for every
+    pre-fetched file, hiding when a Wayback snapshot was used."""
+    if not isinstance(result, dict) or not isinstance(pre, dict):
+        return
+    tier = pre.get("tier")
+    if not tier:
+        return
+    if pre.get("pdf"):
+        record_origin(result, "pdf", tier, pre.get("url"),
+                      captured_at=pre.get("captured_at"))
+    elif pre.get("page"):
+        record_origin(result, "page", tier, pre.get("url"),
+                      captured_at=pre.get("captured_at"))
 
 
 def _current_pdf_tier(slug, bib_key):
@@ -224,16 +245,32 @@ def create_app():
 
             def _process_ref_with_bib_url(ref):
                 bib_url = ref.get("url")
+                # Wipe stale artifacts from previous runs so re-download starts
+                # clean. Otherwise a wrong PDF from a prior API false-match
+                # lingers and ref_match keeps reporting the wrong paper.
+                _wipe_reference_artifacts(project_dir, ref["bib_key"])
                 if bib_url:
                     pre = pre_download_bib_url(project_dir, ref["bib_key"], bib_url)
                     if pre.get("pdf") or pre.get("page"):
-                        result = process_reference(ref, metadata_only=True)
+                        # When the bib has no DOI, the URL IS the citation
+                        # source — running API lookup invites false matches
+                        # on vanity titles ("What We Do" → unrelated paper).
+                        # With a DOI, metadata_only enrichment is safe.
+                        if ref.get("doi") or extract_doi_from_url(bib_url):
+                            result = process_reference(ref, metadata_only=True)
+                        else:
+                            result = make_url_source_result(ref)
                         result["_pre_downloaded"] = pre
                         return result
                     if pre.get("error"):
-                        # Bib URL unreachable — short-circuit. Running the title-only
-                        # API chain would find unrelated papers and present them as the source.
-                        return make_bib_url_unreachable_result(ref, pre)
+                        # Bib URL unreachable. If we have a DOI (in the field, or
+                        # extractable from a doi.org URL), the lookup pipeline can
+                        # still find a working OA copy via CrossRef/Unpaywall/OpenAlex
+                        # — the title-search false-match risk that motivated the
+                        # short-circuit doesn't apply when DOI gives strong identity.
+                        # Without a DOI, bail (e.g. @misc with a vanity URL).
+                        if not (ref.get("doi") or extract_doi_from_url(bib_url)):
+                            return make_bib_url_unreachable_result(ref, pre)
                 return process_reference(ref)
 
             def on_result(idx, result):
@@ -250,6 +287,9 @@ def create_app():
                     # existing files when force=False).
                     files = download_reference_files(project_dir, result["bib_key"], result)
                     result["files"] = files
+                    # Record provenance for the bib URL pre-fetch so the UI shows
+                    # tier="wayback"/"playwright"/"curl_cffi" instead of always "direct".
+                    _stamp_pre_download_provenance(result, result.pop("_pre_downloaded", None))
                 result.pop("_pre_downloaded", None)
                 # Auto-verify the downloaded text actually matches the bib's title+authors.
                 if (result.get("files") or {}).get("md"):
@@ -310,6 +350,13 @@ def create_app():
                 # A3 can detect a tier change and force a ref-match recheck.
                 previous_tier = _current_pdf_tier(slug, bib_key)
 
+                # Wipe stale artifacts from previous runs BEFORE pre-fetch.
+                # Refresh = "start fresh" — otherwise a wrong PDF from a prior
+                # API false-match (e.g. CitadelSecuritiesWhatWeDo → Hokkaido
+                # photocatalysis paper) lingers and ref_match keeps flagging it
+                # as not_matched even after the URL-only path corrects the page.
+                _wipe_reference_artifacts(project_dir, bib_key)
+
                 # Try bib URL first; if it works, only fetch metadata from APIs
                 from file_downloader import pre_download_bib_url
                 bib_url = ref.get("url")
@@ -320,19 +367,28 @@ def create_app():
                     if pre.get("pdf") or pre.get("page"):
                         metadata_only = True
                     elif pre.get("error"):
-                        bib_url_failure = pre
+                        # If we have a DOI (field or doi.org URL), let the full
+                        # lookup pipeline try to find a working OA copy instead
+                        # of bailing. See _process_ref_with_bib_url for rationale.
+                        if not (ref.get("doi") or extract_doi_from_url(bib_url)):
+                            bib_url_failure = pre
 
                 if bib_url_failure:
-                    # Bib URL is broken — don't run the lookup pipeline. Wipe any
-                    # stale wrong-paper artifacts the previous run may have left behind,
-                    # then surface the failure so the user can fix the citation.
-                    _wipe_reference_artifacts(project_dir, bib_key)
+                    # Bib URL is broken — don't run the lookup pipeline.
+                    # (Stale artifacts already wiped at the top of _do_refresh.)
                     result = make_bib_url_unreachable_result(ref, pre)
                     result["files"] = {}
                 else:
-                    result = process_reference(ref, metadata_only=metadata_only)
+                    # See _process_ref_with_bib_url: bypass the API for non-DOI
+                    # vanity URLs whose pre-fetch worked.
+                    if metadata_only and not (ref.get("doi") or extract_doi_from_url(bib_url)):
+                        result = make_url_source_result(ref)
+                    else:
+                        result = process_reference(ref, metadata_only=metadata_only)
                     files = download_reference_files(project_dir, bib_key, result, force=not metadata_only)
                     result["files"] = files
+                    if metadata_only:
+                        _stamp_pre_download_provenance(result, pre)
                 project_store.save_result(slug, result)
                 with _refresh_lock:
                     _refresh_status[status_key] = result
@@ -432,7 +488,9 @@ def create_app():
                     if pre.get("pdf") or pre.get("page"):
                         metadata_only = True
                     elif pre.get("error"):
-                        bib_url_failure = pre
+                        # See _process_ref_with_bib_url — DOI lets us bypass the bail.
+                        if not (ref.get("doi") or extract_doi_from_url(bib_url)):
+                            bib_url_failure = pre
 
                 if bib_url_failure:
                     _wipe_reference_artifacts(project_dir, bib_key)
@@ -441,12 +499,17 @@ def create_app():
                         result["raw_bib"] = ref["raw_bib"]
                     result["files"] = {}
                 else:
-                    result = process_reference(ref, metadata_only=metadata_only)
+                    if metadata_only and not (ref.get("doi") or extract_doi_from_url(bib_url)):
+                        result = make_url_source_result(ref)
+                    else:
+                        result = process_reference(ref, metadata_only=metadata_only)
                     # Attach raw_bib so the BibTeX tab shows the user's pasted entry
                     if ref.get("raw_bib"):
                         result["raw_bib"] = ref["raw_bib"]
                     files = download_reference_files(project_dir, bib_key, result, force=not metadata_only)
                     result["files"] = files
+                    if metadata_only:
+                        _stamp_pre_download_provenance(result, pre)
                 project_store.save_result(slug, result)
                 with _refresh_lock:
                     _refresh_status[status_key] = result
@@ -1486,7 +1549,7 @@ def create_app():
             return jsonify({"error": "Invalid format. Use 'csv' or 'pdf'"}), 400
 
     # ================================================================
-    # Validity report (HTML + references.zip bundle)
+    # Validity report (HTML + report.zip bundle: HTML + references folder)
     # See validity_report_v1.md for spec.
     # ================================================================
 
@@ -1515,7 +1578,7 @@ def create_app():
         return jsonify({
             "ok": True,
             "html_url": f"/projects/{slug}/validity-report/{slug}_report.html",
-            "zip_url":  f"/projects/{slug}/validity-report/references.zip",
+            "zip_url":  f"/projects/{slug}/validity-report/report.zip",
             "html_size": os.path.getsize(html_path) if os.path.isfile(html_path) else 0,
             "zip_size":  os.path.getsize(zip_path) if os.path.isfile(zip_path) else 0,
         })
@@ -1532,19 +1595,20 @@ def create_app():
             os.path.dirname(html_path), os.path.basename(html_path),
             as_attachment=True, download_name=f"{slug}_report.html")
 
-    @app.route("/api/projects/<slug>/validity-report/references-zip", methods=["GET"])
+    @app.route("/api/projects/<slug>/validity-report/report-zip", methods=["GET"])
     def api_download_validity_report_zip(slug):
-        """Download the references bundle (zip). Auto-builds if missing."""
+        """Download the full report bundle (HTML + references). Auto-builds
+        if missing. Always rebuilds to keep the bundle fresh — references on
+        disk may have been refreshed since the last build."""
         from validity_report import build_validity_report
-        out_dir = os.path.join(PROJECTS_DIR, slug, "validity-report")
-        zip_path = os.path.join(out_dir, "references.zip")
-        if not os.path.isfile(zip_path):
-            try:
-                build_validity_report(slug)
-            except ValueError as e:
-                return jsonify({"error": str(e)}), 404
-        return send_from_directory(out_dir, "references.zip",
-                                    as_attachment=True, download_name="references.zip")
+        try:
+            _html, _html_path, zip_path = build_validity_report(slug)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 404
+        out_dir = os.path.dirname(zip_path)
+        return send_from_directory(out_dir, "report.zip",
+                                    as_attachment=True,
+                                    download_name=f"{slug}_report.zip")
 
     @app.route("/projects/<slug>/validity-report/<path:filename>")
     def projects_validity_static(slug, filename):

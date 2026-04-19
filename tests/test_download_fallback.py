@@ -365,6 +365,126 @@ class TestTierOpenReview:
         assert r.kind == "no_match"
 
 
+class TestTierGoogleRescue:
+    """Last-ditch tier: title-search Google for a non-fragile mirror when every
+    URL we knew about failed (regression: russell2020artificial — OpenAlex's
+    `best_oa_location` 404'd on Zenodo, no other tier could find the textbook)."""
+
+    def test_no_title_returns_no_match(self, tmp_path):
+        ctx = FetchContext(url="https://ex.com/x.pdf",
+                           target_path=str(tmp_path / "out.pdf"),
+                           bib_key="k", result={}, title=None)
+        r = fdf._tier_google_rescue(ctx)
+        assert r.ok is False
+        assert r.kind == "no_match"
+
+    def test_finds_mirror_and_downloads(self, tmp_path):
+        ctx = FetchContext(url="https://dead.example.com/x.pdf",
+                           target_path=str(tmp_path / "out.pdf"),
+                           bib_key="k", title="Some Textbook",
+                           result={"pdf_url": "https://dead.example.com/x.pdf"})
+        gs_hit = {"url": "https://uni.edu/course/", "pdf_url": "https://uni.edu/course/book.pdf"}
+        fetched = {}
+        def fake_fetch(url, target, **kw):
+            fetched["url"] = url
+            return FetchResult(ok=True, final_url=url, http_status=200, elapsed_ms=80)
+        with patch("api_clients.google_search.lookup_google_search",
+                   return_value=gs_hit), \
+             patch.object(fdf, "_fetch_pdf", side_effect=fake_fetch):
+            r = fdf._tier_google_rescue(ctx)
+        assert r.ok is True
+        assert fetched["url"] == "https://uni.edu/course/book.pdf"
+
+    def test_skips_url_already_tried(self, tmp_path):
+        """Google's pick equals the primary URL we already tried via direct → skip."""
+        ctx = FetchContext(url="https://dead.example.com/x.pdf",
+                           target_path=str(tmp_path / "out.pdf"),
+                           bib_key="k", title="Some Textbook",
+                           result={"pdf_url": "https://dead.example.com/x.pdf",
+                                   "pdf_url_fallbacks": []})
+        gs_hit = {"pdf_url": "https://dead.example.com/x.pdf"}
+        with patch("api_clients.google_search.lookup_google_search",
+                   return_value=gs_hit):
+            r = fdf._tier_google_rescue(ctx)
+        assert r.ok is False
+        assert r.kind == "no_match"
+
+    def test_skips_fragile_publisher_pick(self, tmp_path):
+        """Google ranks fragile publishers but they bot-block — don't waste a fetch."""
+        ctx = FetchContext(url=None, target_path=str(tmp_path / "out.pdf"),
+                           bib_key="k", title="Some Paper", result={})
+        gs_hit = {"pdf_url": "https://onlinelibrary.wiley.com/doi/pdf/10.1/x"}
+        with patch("api_clients.google_search.lookup_google_search",
+                   return_value=gs_hit):
+            r = fdf._tier_google_rescue(ctx)
+        assert r.ok is False
+        assert r.kind == "no_match"
+
+    def test_ssrn_pick_attempted(self, tmp_path):
+        """SSRN was demoted from FRAGILE_PDF_DOMAINS — finance / econ refs whose
+        only OA copy is on SSRN must reach the rescue download path. force_tier
+        rules in download_rules still route SSRN to curl_cffi when enabled."""
+        ctx = FetchContext(url=None, target_path=str(tmp_path / "out.pdf"),
+                           bib_key="k", title="The Flash Crash", result={})
+        gs_hit = {"pdf_url": "https://papers.ssrn.com/sol3/papers.cfm?abstract_id=1686004"}
+        fetched = {}
+        def fake_fetch(url, target, **kw):
+            fetched["url"] = url
+            return FetchResult(ok=True, final_url=url, http_status=200, elapsed_ms=80)
+        with patch("api_clients.google_search.lookup_google_search",
+                   return_value=gs_hit), \
+             patch.object(fdf, "_fetch_pdf", side_effect=fake_fetch):
+            r = fdf._tier_google_rescue(ctx)
+        assert r.ok is True
+        assert "ssrn.com" in fetched["url"]
+
+    def test_no_pdf_in_google_result(self, tmp_path):
+        """Google found a page but no PDF link — nothing to fetch."""
+        ctx = FetchContext(url=None, target_path=str(tmp_path / "out.pdf"),
+                           bib_key="k", title="Some Paper", result={})
+        gs_hit = {"url": "https://x.com/page", "pdf_url": None}
+        with patch("api_clients.google_search.lookup_google_search",
+                   return_value=gs_hit):
+            r = fdf._tier_google_rescue(ctx)
+        assert r.ok is False
+        assert r.kind == "no_match"
+
+
+class TestRescueRunsLastInPlan:
+    """google_rescue must come AFTER every other tier — calling Google API for
+    every download would be wasteful when direct/wayback/etc. would have worked."""
+
+    def test_rescue_only_runs_after_others_fail(self, tmp_path):
+        fail = _make_fetch_result_fail("http_4xx", 404)
+        rescue_called = MagicMock(return_value=_make_fetch_result_ok("https://uni.edu/x.pdf"))
+        with patch.object(fdf, "_tier_direct", return_value=fail), \
+             patch.object(fdf, "_tier_oa_fallbacks", return_value=fail), \
+             patch.object(fdf, "_tier_doi_negotiation", return_value=fail), \
+             patch.object(fdf, "_tier_openreview", return_value=fail), \
+             patch.object(fdf, "_tier_wayback", return_value=fail), \
+             patch.object(fdf, "_tier_curl_cffi", return_value=fail), \
+             patch.object(fdf, "_tier_playwright", return_value=fail), \
+             patch.object(fdf, "_tier_google_rescue", side_effect=rescue_called):
+            outcome = download_with_fallback(
+                "https://dead.example.com/x.pdf", str(tmp_path / "out.pdf"),
+                bib_key="k",
+                result={"pdf_url": "https://dead.example.com/x.pdf",
+                        "title": "Russell Norvig AI Modern Approach"})
+        assert outcome["ok"] is True
+        assert outcome["tier"] == "google_rescue"
+        rescue_called.assert_called_once()
+
+    def test_rescue_skipped_when_earlier_tier_wins(self, tmp_path):
+        with patch.object(fdf, "_tier_direct",
+                           return_value=_make_fetch_result_ok("https://ex.com/x.pdf")), \
+             patch.object(fdf, "_tier_google_rescue") as rescue:
+            outcome = download_with_fallback(
+                "https://ex.com/x.pdf", str(tmp_path / "out.pdf"),
+                bib_key="k", result={"pdf_url": "https://ex.com/x.pdf", "title": "T"})
+        assert outcome["ok"] is True
+        rescue.assert_not_called()
+
+
 class TestOaFallbacksFromAPIClients:
     """Integration: Unpaywall/OpenAlex return pdf_url_fallbacks which the
     lookup pipeline accumulates on result.pdf_url_fallbacks (§3.1/§3.2)."""

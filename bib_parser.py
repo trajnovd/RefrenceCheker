@@ -2,6 +2,23 @@ import re
 import bibtexparser
 
 
+_DOI_URL_RE = re.compile(r"^https?://(?:dx\.)?doi\.org/(10\.\d{4,9}/\S+)$", re.IGNORECASE)
+
+
+def extract_doi_from_url(url):
+    """Return the DOI substring of a doi.org URL, or None.
+
+    Used both at parse time (to populate ref.doi from a `url={https://doi.org/...}`
+    field) and at lookup time (to decide whether a failed bib URL still gives us
+    a strong identifier — see app.py bail-out logic for bib_url_unreachable)."""
+    if not url:
+        return None
+    m = _DOI_URL_RE.match(url.strip())
+    if not m:
+        return None
+    return m.group(1).rstrip("/.,;)")
+
+
 def _clean_latex(text):
     """Remove LaTeX artifacts from text: braces, commands, etc."""
     if not text:
@@ -60,6 +77,15 @@ def parse_bib_string(bib_string):
         year = fields.get("year", "").strip()
         journal = _clean_latex(fields.get("journal", "") or fields.get("booktitle", ""))
         url = fields.get("url", "").strip()
+
+        # Promote DOI from a doi.org URL when no explicit doi field is present.
+        # Common pattern: bib has only `url = {https://doi.org/10.1111/jofi.12498}`
+        # — without this, the DOI-driven steps (CrossRef, Unpaywall, OpenAlex by DOI)
+        # never run, and a paywalled publisher page traps us at the URL.
+        if not doi and url:
+            extracted = extract_doi_from_url(url)
+            if extracted:
+                doi = extracted
 
         # Extract URL from howpublished or note if url field is empty
         if not url:

@@ -193,10 +193,13 @@ def _build_zip(zip_path, copied):
 # ============================================================
 
 def build_validity_report(slug):
-    """Generate the report HTML + the references bundle (folder + zip).
+    """Generate the report HTML + the bundled `report.zip` (HTML + references/).
 
     Returns: (html: str, html_path: str, zip_path: str)
     Side effects: wipes and recreates projects/<slug>/validity-report/.
+
+    The zip is the user-facing "everything" bundle: extract anywhere and the
+    report HTML opens with all reference artifacts wired up via relative paths.
     """
     import project_store
     proj = project_store.get_project(slug)
@@ -251,24 +254,30 @@ def build_validity_report(slug):
         shutil.rmtree(out_dir, ignore_errors=True)
     os.makedirs(refs_dir, exist_ok=True)
 
-    # ---- 5. Copy linked files + build references.zip ----
+    # ---- 5. Copy linked files into references/ (used by HTML and bundled into zip) ----
     copied = _copy_files_for_keys(project_dir, refs_dir, results, keys_with_files)
-    zip_path = os.path.join(out_dir, "references.zip")
-    _build_zip(zip_path, copied)
-    zip_size = os.path.getsize(zip_path) if os.path.isfile(zip_path) else 0
 
     # ---- 6. Compute summary stats ----
     summary = _build_summary_stats(proj, rows)
 
-    # ---- 7. Render HTML ----
+    # ---- 7. Render HTML (size of the eventual zip is approximated for the
+    # in-page label — actual zip is built next; we recompute size after) ----
+    approx_zip_size = sum(os.path.getsize(p) for _arc, p in copied if os.path.isfile(p))
     html_content = _render_html(
         slug=slug, proj=proj, summary=summary,
         problematic=problematic, partial=partial, clean=clean,
-        tex_content=tex_content, project_dir=project_dir, zip_size=zip_size,
+        tex_content=tex_content, project_dir=project_dir, zip_size=approx_zip_size,
     )
-    html_path = os.path.join(out_dir, f"{slug}_report.html")
+    html_filename = f"{slug}_report.html"
+    html_path = os.path.join(out_dir, html_filename)
     with open(html_path, "w", encoding="utf-8") as f:
         f.write(html_content)
+
+    # ---- 8. Bundle HTML + references/ into report.zip ----
+    # Zip the HTML at the root so it opens in-browser when extracted; the
+    # references stay under references/ so the HTML's relative links resolve.
+    zip_path = os.path.join(out_dir, "report.zip")
+    _build_zip(zip_path, copied + [(html_filename, html_path)])
     return html_content, html_path, zip_path
 
 
@@ -676,8 +685,8 @@ def _summary_html(summary, zip_size):
     &nbsp;<a href="#first-problematic">jump to first problematic →</a>
   </div>
   <div class="summary__zip">
-    📦 <a href="references.zip" download>Download references bundle (references.zip — {_fmt_bytes(zip_size)})</a>
-    <span class="muted">— extract next to this HTML on your laptop to make every source link work offline.</span>
+    📦 <a href="report.zip" download>Download report bundle (report.zip — ~{_fmt_bytes(zip_size)})</a>
+    <span class="muted">— this HTML plus every referenced source file (PDF / HTML / Markdown). Extract anywhere; links resolve offline.</span>
   </div>
 </section>
 '''

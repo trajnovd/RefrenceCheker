@@ -81,6 +81,13 @@ def _humanize_bib_url_failure(failure_info):
     kind = (failure_info or {}).get("kind") or "unknown"
     code = (failure_info or {}).get("http_status")
     url = (failure_info or {}).get("url") or ""
+    if kind == "bot_blocked":
+        return (f"Site bot-blocked us ({'HTTP ' + str(code) + ', ' if code else ''}"
+                "Cloudflare/WAF challenge could not be solved automatically). "
+                "Use Paste Content to add the article text manually.")
+    if kind == "js_challenge":
+        return ("URL serves a JS challenge that Playwright could not pass. "
+                "Use Paste Content to add the article text manually.")
     if kind == "http_4xx" and code:
         return f"Bib URL returned HTTP {code} (citation is unreachable — fix the URL)"
     if kind == "http_5xx" and code:
@@ -91,6 +98,56 @@ def _humanize_bib_url_failure(failure_info):
         detail = (failure_info or {}).get("detail") or ""
         return f"Bib URL did not return valid content ({detail or 'invalid response'})"
     return f"Bib URL is unreachable ({kind})"
+
+
+def make_url_source_result(ref):
+    """Build a result for a ref whose non-DOI bib URL was pre-downloaded.
+
+    When the bib URL succeeded AND the ref has no DOI, the URL itself IS the
+    citation source — running the API pipeline only invites false matches
+    (vanity titles like "What We Do", "Trend-Following" fuzzy-match unrelated
+    papers and pollute the result with wrong PDFs / DOIs / abstracts).
+
+    This bypass produces a clean URL-sourced result: bib identity preserved,
+    no API enrichment, no `pdf_url_fallbacks` to mislead the download
+    orchestrator. Sources is `["URL"]` so the UI shows where the content came
+    from. PDF detection is preserved for `.pdf` URLs (still wired through
+    pre_download_bib_url's normalization)."""
+    from file_downloader import _normalize_bib_url
+    bib_url = ref.get("url")
+    normalized = _normalize_bib_url(bib_url) if bib_url else bib_url
+    is_pdf = bool(normalized) and (
+        normalized.lower().endswith(".pdf") or "/pdf/" in normalized.lower()
+    )
+    bib_authors = ref.get("authors")
+    if isinstance(bib_authors, list):
+        authors = bib_authors
+    elif bib_authors:
+        authors = [bib_authors]
+    else:
+        authors = []
+    return {
+        "bib_key": ref["bib_key"],
+        "title": ref.get("title"),
+        "authors": authors,
+        "year": ref.get("year"),
+        "journal": ref.get("journal"),
+        "doi": None,
+        "abstract": None,
+        "pdf_url": normalized if is_pdf else None,
+        "url": bib_url,
+        "citation_count": None,
+        "sources": ["URL"],
+        "status": "found_pdf" if is_pdf else "found_web_page",
+        "error": None,
+        "raw_bib": ref.get("raw_bib"),
+        "files_origin": {},
+        # Hard contract for download_reference_files: the bib URL IS the
+        # source — never run the PDF tier orchestrator (openreview /
+        # google_rescue / wayback would title-search and find unrelated
+        # papers like "What We Do Not Fund" for "What We Do").
+        "url_source_only": True,
+    }
 
 
 def make_bib_url_unreachable_result(ref, failure_info):
@@ -155,6 +212,15 @@ def process_reference(ref, metadata_only=False):
     entry_type = ref.get("entry_type", "")
     is_book = entry_type in BOOK_TYPES
 
+    # Promote DOI from a doi.org URL when no explicit doi field is present.
+    # Mirrors the bib_parser path so already-saved refs (project.json from
+    # before that parser change) also benefit on re-runs.
+    if not doi and ref.get("url"):
+        from bib_parser import extract_doi_from_url
+        extracted = extract_doi_from_url(ref["url"])
+        if extracted:
+            doi = extracted
+
     logger.info("[%s] START title=%s doi=%s type=%s", bib_key, title, doi, entry_type)
 
     result = {
@@ -192,6 +258,14 @@ def process_reference(ref, metadata_only=False):
         _log_step(bib_key, "arXiv", True,
                   f"id={arxiv_id} pdf=https://arxiv.org/pdf/{arxiv_id}")
 
+    # arXiv anchor: when the bib provides an arXiv ID, arXiv IS the canonical
+    # source. Subsequent API enrichment must not override pdf_url, url, or
+    # authors — APIs match by title and frequently surface the wrong paper
+    # for generic ML titles ("Neural Machine Translation by ..." → matches
+    # Sennrich's "Neural Machine Translation of Rare Words ..."). Citation
+    # count and abstract are still safe to enrich.
+    arxiv_anchor = bool(arxiv_id)
+
     # Step 1: CrossRef + Unpaywall (if non-arXiv DOI available)
     if doi and not arxiv_id:
         cr = lookup_crossref(doi)
@@ -228,7 +302,10 @@ def process_reference(ref, metadata_only=False):
         # v6.1 §3.2: collect alternate OA locations for the fallback walker.
         for u in (oa.get("pdf_url_fallbacks") or []):
             result.setdefault("pdf_url_fallbacks", []).append(u)
-        if not result["authors"] or result["authors"] == [authors]:
+        # Authors override: only when bib didn't provide a real author list
+        # AND we don't have an arXiv anchor (API title-match may be wrong).
+        if (not arxiv_anchor
+                and (not result["authors"] or result["authors"] == [authors])):
             result["authors"] = oa.get("authors") or result["authors"]
         result["year"] = result["year"] or oa.get("year")
     _log_step(bib_key, "OpenAlex", oa is not None,
@@ -282,7 +359,7 @@ def process_reference(ref, metadata_only=False):
                             and has_doi
                             and any(s in ("crossref", "unpaywall") for s in result["sources"]))
 
-        arxiv = search_arxiv(title)
+        arxiv = search_arxiv(title, authors=ref.get("authors"))
         if arxiv:
             current_pdf = (result.get("pdf_url") or "").lower()
             current_url = (result.get("url") or "").lower()
@@ -334,8 +411,17 @@ def process_reference(ref, metadata_only=False):
     # publisher domain (Wiley / SSRN / econstor / ScienceDirect / Springer / JSTOR).
     # Those publishers claim OA via Unpaywall but bot-block anonymous downloads —
     # a university mirror / author homepage is almost always downloadable.
+    #
+    # Books also always trigger Google Search even when a pdf_url is set: OpenAlex's
+    # `best_oa_location` for textbooks is unreliable (often points to a Zenodo
+    # deposit unrelated to the work — see russell2020artificial regression), and
+    # course-mirror PDFs found by Google are reliable.
+    # arXiv anchor short-circuits Step 4: arXiv is the source, no Google
+    # Search override (regression: bahdanau2015neural — inproceedings is in
+    # BOOK_TYPES, so the book-mirror override replaced arxiv.org with iclr.cc).
     current_is_fragile = _is_fragile_pdf(result.get("pdf_url"))
-    if title and (not result.get("pdf_url") or current_is_fragile):
+    if (title and not arxiv_anchor
+            and (is_book or not result.get("pdf_url") or current_is_fragile)):
         # Extract a doc identifier (Press Release 2024-137, SR 11-7, etc.) from the bib's
         # number/note fields — strong fallback when the user-composed title doesn't index well.
         from api_clients.google_search import _extract_doc_id
@@ -357,6 +443,13 @@ def process_reference(ref, metadata_only=False):
                 result["pdf_url"] = gs_pdf
             elif gs_pdf and current_is_fragile and not _is_fragile_pdf(gs_pdf):
                 logger.info("[%s] Overriding fragile pdf_url (%s) with Google-found alt (%s)",
+                            bib_key, result["pdf_url"], gs_pdf)
+                result["pdf_url"] = gs_pdf
+            elif gs_pdf and is_book and not _is_fragile_pdf(gs_pdf):
+                # Books: prefer course-mirror / author-page PDFs over OpenAlex's
+                # `best_oa_location`, which often points to unrelated Zenodo
+                # deposits or wrong-edition records.
+                logger.info("[%s] Book — overriding pdf_url (%s) with Google-found mirror (%s)",
                             bib_key, result["pdf_url"], gs_pdf)
                 result["pdf_url"] = gs_pdf
             if not result["url"] and gs.get("url"):
@@ -389,7 +482,7 @@ def process_reference(ref, metadata_only=False):
             and not result.get("pdf_url")
             and not result.get("url")
             and title):
-        arxiv = search_arxiv(title)
+        arxiv = search_arxiv(title, authors=ref.get("authors"))
         if arxiv:
             ax_year = _arxiv_year(arxiv.get("arxiv_id"))
             if not _years_compatible(year, ax_year):

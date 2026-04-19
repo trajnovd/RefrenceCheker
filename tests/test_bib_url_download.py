@@ -160,7 +160,11 @@ class TestDownloadFailureClassification:
 
     def test_pdf_4xx_classification(self, tmp_path):
         from file_downloader import _download_pdf
-        with patch("file_downloader.get_session") as mock_session:
+        # 403 also triggers heavy fallback + Wayback in the new pipeline; mock
+        # them to off so the test isolates the direct-fetch classification.
+        with patch("file_downloader.get_session") as mock_session, \
+             patch("file_downloader._try_heavy_pdf_fallback", return_value=None), \
+             patch("file_downloader._try_wayback_pdf_fallback", return_value=False):
             mock_get = MagicMock()
             mock_session.return_value.get = mock_get
             resp = MagicMock()
@@ -175,7 +179,8 @@ class TestDownloadFailureClassification:
 
     def test_pdf_5xx_classification(self, tmp_path):
         from file_downloader import _download_pdf
-        with patch("file_downloader.get_session") as mock_session:
+        with patch("file_downloader.get_session") as mock_session, \
+             patch("file_downloader._try_wayback_pdf_fallback", return_value=False):
             mock_get = MagicMock()
             mock_session.return_value.get = mock_get
             resp = MagicMock()
@@ -190,7 +195,8 @@ class TestDownloadFailureClassification:
     def test_pdf_network_error_classification(self, tmp_path):
         from file_downloader import _download_pdf
         import requests
-        with patch("file_downloader.get_session") as mock_session:
+        with patch("file_downloader.get_session") as mock_session, \
+             patch("file_downloader._try_wayback_pdf_fallback", return_value=False):
             mock_session.return_value.get.side_effect = requests.ConnectionError("DNS failure")
             status = {}
             ok = _download_pdf("https://example.com/x.pdf",
@@ -201,7 +207,10 @@ class TestDownloadFailureClassification:
 
     def test_page_4xx_classification(self, tmp_path):
         from file_downloader import _download_page
-        with patch("file_downloader.get_session") as mock_session:
+        # Wayback HTML fallback is always tried after a non-200; mock to off
+        # so the test isolates the direct-fetch classification.
+        with patch("file_downloader.get_session") as mock_session, \
+             patch("file_downloader._try_wayback_html_fallback", return_value=False):
             mock_get = MagicMock()
             mock_session.return_value.get = mock_get
             resp = MagicMock()

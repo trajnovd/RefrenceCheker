@@ -13,8 +13,56 @@ def _normalize(text):
     return re.sub(r"[^\w\s]", "", text.lower()).strip()
 
 
-def search_arxiv(title, max_results=3, timeout=10):
-    """Search arXiv by title. Returns dict with pdf_url, abstract, arxiv_id or None."""
+def _last_names(authors):
+    """Extract a set of normalized last-name tokens from various author formats.
+
+    Handles:
+      - list of strings (["Baddeley, Alan", "Hitch, Graham J."])
+      - "A and B and C" string (BibTeX style)
+      - "Last, First" or "First Last" each
+      - empty/None → empty set
+    """
+    if not authors:
+        return set()
+    items = authors if isinstance(authors, list) else None
+    if items is None:
+        s = str(authors).strip()
+        # Split on " and " (BibTeX) or ";"
+        for sep in (" and ", ";"):
+            if sep in s:
+                items = [p.strip() for p in s.split(sep)]
+                break
+        else:
+            items = [s]
+    last_names = set()
+    for item in items:
+        if not item:
+            continue
+        name = str(item).strip().strip("{}").strip()
+        if not name:
+            continue
+        # "Last, First" → "Last"
+        if "," in name:
+            last = name.split(",", 1)[0].strip()
+        else:
+            # "First M. Last" → last word
+            parts = name.split()
+            last = parts[-1] if parts else ""
+        last = _normalize(last)
+        if last and len(last) >= 2:  # 1-letter "tokens" are noise
+            last_names.add(last)
+    return last_names
+
+
+def search_arxiv(title, authors=None, max_results=3, timeout=10):
+    """Search arXiv by title. Returns dict with pdf_url, abstract, arxiv_id or None.
+
+    When `authors` is provided (bib author field — string or list), an arXiv
+    hit must share at least one author last-name with the bib OR have a very
+    high title similarity. Without this, generic 2-word titles like "Working
+    memory" (Baddeley) match unrelated papers like "Working Memory Graphs"
+    (Loynd et al., 1911.07141) by substring and the wrong PDF gets downloaded.
+    """
     if not title:
         return None
 
@@ -33,24 +81,43 @@ def search_arxiv(title, max_results=3, timeout=10):
         ns = {"atom": "http://www.w3.org/2005/Atom"}
 
         norm_query = _normalize(title)
+        bib_lastnames = _last_names(authors)
 
         for entry in root.findall("atom:entry", ns):
             entry_title = entry.findtext("atom:title", default="", namespaces=ns).strip()
             entry_title = re.sub(r"\s+", " ", entry_title)
 
-            # Check title match
+            # Title-match strength classification:
+            #   exact_match   → titles equal after normalization
+            #   strong_match  → ≥0.85 word overlap (rare extra word ok)
+            #   weak_match    → query is substring of longer result (or ≥0.7 overlap)
+            #   no_match      → reject
             norm_result = _normalize(entry_title)
-            if norm_query != norm_result:
-                # Allow substring match
-                if norm_query not in norm_result and norm_result not in norm_query:
-                    # Check word overlap
-                    q_words = set(norm_query.split())
-                    r_words = set(norm_result.split())
-                    if not q_words or not r_words:
-                        continue
+            q_words = set(norm_query.split())
+            r_words = set(norm_result.split())
+            exact_match = norm_query == norm_result
+            strong_match = False
+            weak_match = False
+            if not exact_match:
+                if q_words and r_words:
                     overlap = len(q_words & r_words) / max(len(q_words), len(r_words))
-                    if overlap < 0.7:
-                        continue
+                    strong_match = overlap >= 0.85
+                    weak_match = (overlap >= 0.7
+                                  or norm_query in norm_result
+                                  or norm_result in norm_query)
+                if not (strong_match or weak_match):
+                    continue
+            # Author guard: weak title matches REQUIRE author overlap when bib
+            # provides authors. Exact / strong matches are allowed without
+            # (different author orderings, single-author shortcuts).
+            if bib_lastnames and not exact_match and not strong_match:
+                entry_lastnames = _result_lastnames(entry, ns)
+                if entry_lastnames and not (bib_lastnames & entry_lastnames):
+                    logger.debug(
+                        "arXiv rejecting weak title match — author mismatch: "
+                        "bib=%s arxiv_authors=%s title=%r",
+                        sorted(bib_lastnames), sorted(entry_lastnames), entry_title[:80])
+                    continue
 
             # Extract arXiv ID from entry id URL
             entry_id = entry.findtext("atom:id", default="", namespaces=ns)
@@ -83,3 +150,20 @@ def search_arxiv(title, max_results=3, timeout=10):
     except Exception as e:
         logger.debug("arXiv search error: %s", e)
         return None
+
+
+def _result_lastnames(entry, ns):
+    """Pull last-name tokens from an arXiv atom:entry's authors."""
+    out = set()
+    for author in entry.findall("atom:author", ns):
+        name = author.findtext("atom:name", default="", namespaces=ns).strip()
+        if not name:
+            continue
+        # arXiv authors are "First M. Last" — last word is the surname
+        parts = name.split()
+        if not parts:
+            continue
+        last = _normalize(parts[-1])
+        if last and len(last) >= 2:
+            out.add(last)
+    return out

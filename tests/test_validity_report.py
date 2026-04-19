@@ -5,7 +5,7 @@ build_validity_report:
 - Classifies each into the right bucket
 - Produces one HTML block per citation occurrence (so a 3x cited key → 3 blocks)
 - Copies files only for problematic + partial refs into references/
-- Builds references.zip with a top-level references/ prefix
+- Builds report.zip containing the report HTML at the root + references/ folder
 - Renders key strings into the HTML
 """
 
@@ -348,15 +348,24 @@ class TestBuildValidityReport:
         assert "references/clean_ref_pdf.pdf" not in names
         assert "references/clean_ref.md" not in names
 
-    def test_zip_paths_have_references_prefix(self, tmp_path):
-        """Extracting next to the HTML must reproduce the references/ subfolder."""
+    def test_zip_contains_report_html_at_root(self, tmp_path):
+        """The bundle is the user's 'everything' deliverable: extracting it
+        must produce <slug>_report.html at the top + references/ next to it,
+        so opening the HTML from the extracted folder finds every linked file."""
         slug, _, _ = _make_synthetic_project(tmp_path)
         with self._patched_settings(tmp_path):
             _, _, zip_path = build_validity_report(slug)
+        assert os.path.basename(zip_path) == "report.zip"
         with zipfile.ZipFile(zip_path) as zf:
-            for name in zf.namelist():
-                assert name.startswith("references/"), \
-                    f"zip entry {name!r} not under references/ prefix"
+            names = set(zf.namelist())
+        # Report HTML at root
+        assert f"{slug}_report.html" in names
+        # References folder preserved
+        for name in names:
+            if name == f"{slug}_report.html":
+                continue
+            assert name.startswith("references/"), \
+                f"zip entry {name!r} should be either the report HTML or under references/"
 
     def test_per_occurrence_blocks_for_repeated_cites(self, tmp_path):
         """broken_ref is cited twice (line 4 and line 8) — must appear as
@@ -383,8 +392,8 @@ class TestBuildValidityReport:
         assert "Methodology" in html
         # Summary counters present
         assert "CITATIONS NEEDING ATTENTION" in html
-        # Download link for the zip
-        assert 'href="references.zip"' in html
+        # Download link for the zip — points at report.zip (HTML + references)
+        assert 'href="report.zip"' in html
 
     def test_html_contains_severity_badges(self, tmp_path):
         slug, _, _ = _make_synthetic_project(tmp_path)

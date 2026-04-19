@@ -21,13 +21,16 @@ from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 
-def record_origin(result, filetype, tier, url):
+def record_origin(result, filetype, tier, url, captured_at=None):
     """Record that `filetype` for this result came from `tier` (with URL).
 
     Idempotent: always overwrites the entry for the given filetype, so
     re-downloads via a different tier correctly update the provenance.
     Never raises — bad inputs are silently ignored so tier implementations
     can't break the pipeline by omitting this call or passing None.
+
+    `captured_at` defaults to "now" but Wayback snapshots should pass the
+    snapshot's own timestamp instead — that's what the user actually got.
     """
     if not isinstance(result, dict) or not filetype or not tier:
         return
@@ -40,7 +43,7 @@ def record_origin(result, filetype, tier, url):
         "tier": tier,
         "url": url,
         "host": host.lower(),
-        "captured_at": datetime.now(timezone.utc).isoformat(),
+        "captured_at": captured_at or datetime.now(timezone.utc).isoformat(),
     }
 
 
