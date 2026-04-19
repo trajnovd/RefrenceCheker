@@ -85,6 +85,38 @@ JS_CHALLENGE_HOSTS = (
 )
 
 
+# Publisher hosts whose HTML landing pages serve a paywall / login wall /
+# captcha to anonymous fetchers — content is never available via plain HTTP.
+# These differ from FRAGILE_PDF_DOMAINS (gates PDF downloads) and
+# NONCONTENT_DOMAINS (commerce sites). Saving HTML from these as "the source"
+# pollutes the .md with captcha/login text that ref_match flags as wrong.
+#
+# JSTOR is the canonical example: returns 200 with a "Our systems have
+# detected unusual traffic activity / reCAPTCHA" page for every old paper.
+HTML_PAYWALL_HOSTS = (
+    "jstor.org",
+    "onlinelibrary.wiley.com",
+    "academic.oup.com",
+    "tandfonline.com",
+    # ResearchGate's HTML pages serve a "preview teaser" — title + first
+    # paragraph of the abstract, then a Sign-In/Request-Full-Text wall.
+    # Ingesting the teaser as content pollutes the .md and confuses
+    # ref_match (no real body to match against). The force_tier=curl_cffi
+    # rule below stays — for PDFs RG sometimes serves real content via TLS
+    # impersonation. For HTML it never does.
+    "researchgate.net",
+    # Google Books shows snippet view (a few paragraphs at most) — saving
+    # those as content makes ref_match see snippet-text rather than the
+    # actual book. Treat the same way as RG/JSTOR: skip for HTML, fall
+    # through to a real-content host (author homepage, course mirror, NBER).
+    "books.google.com",
+    "books.google.co.uk",
+    "play.google.com",
+    # NOTE: sciencedirect.com is in JS_CHALLENGE_HOSTS already (Playwright
+    # may pass the challenge); keeping it there avoids double-handling.
+)
+
+
 def is_fragile(url):
     """True if the URL is on a bot-blocked publisher domain (host suffix match)."""
     if not url:
@@ -106,6 +138,22 @@ def is_js_challenge(url):
     except Exception:
         return False
     return any(host == d or host.endswith("." + d) for d in JS_CHALLENGE_HOSTS)
+
+
+def is_html_paywall(url):
+    """True if the URL is on a known HTML-paywall host (JSTOR / Wiley /
+    Oxford Academic / Taylor&Francis). HTML downloads from these always
+    yield captcha or login walls, never real content. The lookup pipeline
+    keeps the URL as the canonical citation link but never tries to download
+    HTML from it."""
+    if not url:
+        return False
+    try:
+        from urllib.parse import urlparse
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return False
+    return any(host == d or host.endswith("." + d) for d in HTML_PAYWALL_HOSTS)
 
 
 def is_noncontent(url):

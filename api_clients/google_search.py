@@ -22,6 +22,7 @@ SEARCH_URL = "https://www.googleapis.com/customsearch/v1"
 # so existing callers + pinned tests keep working.
 from download_rules import is_fragile as _is_fragile_pdf_url  # noqa: E402
 from download_rules import is_noncontent as _is_noncontent_url  # noqa: E402
+from download_rules import is_html_paywall as _is_html_paywall_url  # noqa: E402
 from download_rules import FRAGILE_PDF_DOMAINS as _FRAGILE_PDF_DOMAINS  # noqa: E402
 from download_rules import NONCONTENT_DOMAINS as _NONCONTENT_DOMAINS  # noqa: E402
 
@@ -147,6 +148,42 @@ def lookup_google_search(title, doi=None, authors=None, doc_id=None, timeout=10,
                 result["url"] = pdf_result.get("url")
     elif result is None:
         result = _run_query(f"{quoted_title} filetype:pdf", title, timeout, max_retries)
+
+    # Pass 3 (last resort): RELAXED bare-words query.
+    # Earlier passes all use exact-phrase quoting around the title — that's
+    # precise but brittle. For old books and reprints, the exact phrase often
+    # doesn't appear verbatim on legitimate content hosts (author faculty
+    # pages reword subtitles, course pages truncate, mirrors abbreviate).
+    # When we still have no usable URL or PDF after the strict passes,
+    # drop the quotes and let Google's relevance ranking surface candidates
+    # we'd otherwise miss. The author surname stays as a strong anchor so
+    # the search doesn't drift to unrelated papers sharing keywords.
+    #
+    # Regression: Hasbrouck2007 — strict passes returned only Amazon / RG /
+    # Google Books (all filtered by the parser); the relaxed pass surfaces
+    # Hasbrouck's NYU faculty page, which has chapter excerpts.
+    needs_rescue = (result is None
+                    or not result.get("pdf_url"))
+    if needs_rescue and first_last:
+        # Title as bare words — strip quotes/colons/punctuation that would
+        # otherwise re-introduce phrase matching.
+        bare_title = re.sub(r'[":,.;]', " ", title)
+        bare_title = re.sub(r"\s+", " ", bare_title).strip()
+        relaxed_query = f"{bare_title} {first_last}"
+        logger.debug("GoogleSearch pass-3 relaxed bare-words query: q=%s", relaxed_query)
+        relaxed = _run_query(relaxed_query, title, timeout, max_retries)
+        if relaxed:
+            if result is None:
+                result = relaxed
+            else:
+                # Merge — only fill in missing fields, never overwrite a
+                # better hit from an earlier strict pass.
+                if relaxed.get("url") and not result.get("url"):
+                    result["url"] = relaxed["url"]
+                if relaxed.get("pdf_url") and not result.get("pdf_url"):
+                    result["pdf_url"] = relaxed["pdf_url"]
+                if relaxed.get("abstract") and not result.get("abstract"):
+                    result["abstract"] = relaxed["abstract"]
 
     return result
 
@@ -284,13 +321,25 @@ def _parse_results(data, query_title, assume_pdf=False):
         item_title = item.get("title", "")
         snippet = item.get("snippet", "")
 
-        # Check title relevance
-        norm_title = _normalize(item_title)
+        # Check title-or-snippet relevance.
+        #
+        # Title alone is too brittle: Google's `title` for a faculty-hosted
+        # PDF is usually just the filename ("Hasbrouck's book.pdf",
+        # "lecture-notes.pdf"), which has ~0 overlap with a long bib title.
+        # The snippet contains text extracted from the PDF body itself —
+        # much richer signal. Set-based overlap means a long snippet can't
+        # artificially inflate the match (each word counts once).
+        #
+        # Regression: Hasbrouck2007EmpiricalMicrostructure — Google's first
+        # result for the manual search is a Buffalo .edu PDF whose Google
+        # title is just "Hasbrouck's book"; only the snippet mentions
+        # "Empirical Market Microstructure".
         query_words = set(norm_query.split())
-        title_words = set(norm_title.split())
         if not query_words:
             continue
-        overlap = len(query_words & title_words) / len(query_words)
+        combined = (item_title or "") + " " + (snippet or "")
+        combined_words = set(_normalize(combined).split())
+        overlap = len(query_words & combined_words) / len(query_words)
         if overlap < 0.5:
             continue
 
@@ -311,8 +360,12 @@ def _parse_results(data, query_title, assume_pdf=False):
         if not pdf_url and is_pdf_link and not _is_fragile_pdf_url(link):
             pdf_url = link
 
-        # Grab first relevant page URL
-        if not best_url:
+        # Grab first relevant page URL — but skip HTML-paywall hosts.
+        # JSTOR / Wiley / Oxford Academic / T&F / ResearchGate return 200 with
+        # a captcha or "request full text" teaser; saving those as content
+        # poisons the .md and breaks ref_match. Fall through to the next item
+        # (university mirror, author homepage, etc.).
+        if not best_url and not _is_html_paywall_url(link):
             best_url = link
 
         # Use snippet as abstract if it's substantial

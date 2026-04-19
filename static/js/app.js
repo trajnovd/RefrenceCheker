@@ -1693,6 +1693,13 @@
   function _refSourceLabel(ref) {
     var files = (ref && ref.files) || {};
     if (ref && ref.status === 'bib_url_unreachable') {
+      // Distinguish a genuinely-broken URL (404 / dead) from a working URL
+      // we couldn't fetch through bot protection (Cloudflare/WAF). The user's
+      // remediation is different in each case.
+      if (_isBotBlocked(ref)) {
+        return { label: 'BOT-BLOCKED', cls: 'bot-blocked',
+                 title: ref.error || 'Site bot-blocked — use Paste Content' };
+      }
       return { label: 'broken URL', cls: 'broken',
                title: ref.error || 'Bib URL unreachable — fix the citation' };
     }

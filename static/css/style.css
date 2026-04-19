@@ -1403,6 +1403,7 @@ h1, h2, h3, h4 {
 .review-ref-card__src--abstract  { background: #fed7aa; color: #7c2d12; border: 1px solid #fdba74; }
 .review-ref-card__src--notfound  { background: #fee2e2; color: #7f1d1d; border: 1px solid #fca5a5; }
 .review-ref-card__src--broken    { background: #fef3c7; color: #92400e; border: 1px solid #fcd34d; font-weight: 700; }
+.review-ref-card__src--bot-blocked { background: #ede9fe; color: #4c1d95; border: 1px solid #c4b5fd; font-weight: 700; letter-spacing: 0.02em; }
 
 /* Identity-match indicator on the left-panel review card. */
 .review-ref-card__match {

@@ -27,6 +27,11 @@ def parse_tex_citations(tex_content):
 
     Each entry: {"bib_key", "position", "line", "cite_command", "context_before", "context_after"}
     Multi-key cites like \\cite{a,b,c} produce one entry per key.
+
+    Citations inside LaTeX comments (`%\\cite{...}` or `text % \\cite{...}`)
+    are skipped — they're commented-out and shouldn't appear in the citation
+    list. An unescaped `%` anywhere on the line BEFORE the cite marks it as
+    commented; an escaped `\\%` does not start a comment.
     """
     citations = []
 
@@ -46,11 +51,36 @@ def parse_tex_citations(tex_content):
                 hi = mid - 1
         return lo  # 1-based line number
 
+    def _is_commented(pos, line):
+        """True if pos is inside a LaTeX comment (after an unescaped `%` on
+        the same line). `line` is 1-based — line_starts is 0-based."""
+        line_start = line_starts[line - 1]
+        prefix = tex_content[line_start:pos]
+        # Walk left-to-right looking for an unescaped `%`. A `%` is escaped
+        # iff preceded by an odd number of backslashes (so `\\%` IS a comment
+        # marker because the `\\` is itself escaped, but `\%` is literal).
+        i = 0
+        while i < len(prefix):
+            if prefix[i] == '%':
+                # Count consecutive backslashes immediately before this %
+                bs = 0
+                j = i - 1
+                while j >= 0 and prefix[j] == '\\':
+                    bs += 1
+                    j -= 1
+                if bs % 2 == 0:
+                    return True   # unescaped → real comment marker
+            i += 1
+        return False
+
     for match in _CITE_RE.finditer(tex_content):
         keys_str = match.group(1)
         cite_command = match.group(0)
         pos = match.start()
         line = _get_line(pos)
+
+        if _is_commented(pos, line):
+            continue
 
         # Context: ~200 chars before and after
         ctx_start = max(0, pos - 200)

@@ -250,6 +250,127 @@ class TestBrowserPool:
 # JS-challenge host registry (download_rules)
 # ============================================================
 
+class TestHtmlPaywallRefusal:
+    """Regression: gastineau1991short — Google Scholar returned a JSTOR URL,
+    JSTOR served a 200 reCAPTCHA wall, we saved it as the source, ref_match
+    flagged the .md as not_matched. JSTOR-class HTML paywalls must be refused
+    upfront (no heavy retry, no Wayback — those publishers' robots.txt blocks
+    the Archive too)."""
+
+    def test_jstor_refused_without_network(self, tmp_path):
+        import file_downloader as fd
+        out_path = str(tmp_path / "p.html")
+        with patch.object(fd, "get_session") as gs:
+            status = {}
+            ok = fd._download_page("https://www.jstor.org/stable/4479463",
+                                    out_path, status_out=status)
+        assert ok is False
+        assert status["kind"] == "html_paywall"
+        # Direct GET must NOT have been called (the wall is universal)
+        gs.return_value.get.assert_not_called()
+
+    def test_wiley_html_refused(self, tmp_path):
+        import file_downloader as fd
+        with patch.object(fd, "get_session") as gs:
+            status = {}
+            ok = fd._download_page(
+                "https://onlinelibrary.wiley.com/doi/10.1111/jofi.12498",
+                str(tmp_path / "p.html"), status_out=status)
+        assert ok is False
+        assert status["kind"] == "html_paywall"
+        gs.return_value.get.assert_not_called()
+
+    def test_oxford_academic_html_refused(self, tmp_path):
+        import file_downloader as fd
+        with patch.object(fd, "get_session") as gs:
+            status = {}
+            ok = fd._download_page(
+                "https://academic.oup.com/rfs/article/29/1/5/1576035",
+                str(tmp_path / "p.html"), status_out=status)
+        assert ok is False
+        assert status["kind"] == "html_paywall"
+
+    def test_taylor_francis_html_refused(self, tmp_path):
+        import file_downloader as fd
+        with patch.object(fd, "get_session") as gs:
+            status = {}
+            ok = fd._download_page(
+                "https://www.tandfonline.com/doi/full/10.1080/12345.2024",
+                str(tmp_path / "p.html"), status_out=status)
+        assert ok is False
+        assert status["kind"] == "html_paywall"
+
+    def test_researchgate_html_refused(self, tmp_path):
+        """Regression: Hasbrouck2007 — RG returned a teaser page (200 OK,
+        title + abstract snippet) and we saved it. The HTML-paywall list
+        now refuses RG; the force_tier=curl_cffi rule for RG (PDFs) is
+        unaffected."""
+        import file_downloader as fd
+        with patch.object(fd, "get_session") as gs:
+            status = {}
+            ok = fd._download_page(
+                "https://www.researchgate.net/publication/254441114_Empirical_Market_Microstructure",
+                str(tmp_path / "p.html"), status_out=status)
+        assert ok is False
+        assert status["kind"] == "html_paywall"
+        gs.return_value.get.assert_not_called()
+
+    def test_normal_host_still_downloads(self, tmp_path):
+        """Non-paywall hosts go through the normal path."""
+        import file_downloader as fd
+        out_path = str(tmp_path / "p.html")
+        resp = MagicMock(status_code=200, text="<html><body>" + "x" * 200 + "</body></html>")
+        with patch.object(fd, "get_session") as gs:
+            gs.return_value.get.return_value = resp
+            ok = fd._download_page("https://arxiv.org/abs/1409.0473", out_path)
+        assert ok is True
+        gs.return_value.get.assert_called_once()
+
+
+class TestIsHtmlPaywall:
+    def test_jstor_recognized(self):
+        from download_rules import is_html_paywall
+        assert is_html_paywall("https://www.jstor.org/stable/4479463")
+        assert is_html_paywall("https://JSTOR.org/x")  # case-insensitive
+
+    def test_wiley_recognized(self):
+        from download_rules import is_html_paywall
+        assert is_html_paywall("https://onlinelibrary.wiley.com/doi/10.1/x")
+
+    def test_oxford_academic_recognized(self):
+        from download_rules import is_html_paywall
+        assert is_html_paywall("https://academic.oup.com/rfs/article/29/1/5")
+
+    def test_tandfonline_recognized(self):
+        from download_rules import is_html_paywall
+        assert is_html_paywall("https://www.tandfonline.com/doi/abs/10.1/x")
+
+    def test_researchgate_recognized(self):
+        from download_rules import is_html_paywall
+        assert is_html_paywall("https://www.researchgate.net/publication/254441114")
+        assert is_html_paywall("https://researchgate.net/x")  # no www
+
+    def test_researchgate_pdf_still_routes_to_curl_cffi(self):
+        """RG on the HTML-paywall list must NOT break the PDF orchestrator's
+        existing force_tier=curl_cffi rule — RG sometimes serves real PDFs
+        through TLS impersonation. Two separate code paths."""
+        from file_downloader_fallback import _resolve_force_tier
+        assert _resolve_force_tier(
+            "https://www.researchgate.net/publication/254441114/file.pdf"
+        ) == "curl_cffi"
+
+    def test_unrelated_hosts_not_flagged(self):
+        from download_rules import is_html_paywall
+        assert not is_html_paywall("https://arxiv.org/abs/1409.0473")
+        assert not is_html_paywall("https://www.nber.org/papers/w20592")
+        assert not is_html_paywall("https://example.com/")
+
+    def test_empty_url(self):
+        from download_rules import is_html_paywall
+        assert not is_html_paywall(None)
+        assert not is_html_paywall("")
+
+
 class TestPlaywrightSparsePageRejection:
     """Regression: wooldridge1995intelligent. Playwright went to a handle.net
     redirect, the redirect page had no real content, page.pdf() produced a

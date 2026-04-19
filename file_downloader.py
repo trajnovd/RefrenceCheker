@@ -799,6 +799,16 @@ def _download_page(url, path, status_out=None):
 
     See `_download_pdf` for `status_out` failure semantics.
     """
+    from download_rules import is_js_challenge, is_html_paywall
+    if is_html_paywall(url):
+        # JSTOR / Wiley / Oxford Academic / T&F serve a captcha / login wall
+        # to anonymous fetchers. Don't try heavy fallback (the wall blocks
+        # real browsers too without a session) and don't try Wayback (these
+        # publishers' robots.txt blocks the Internet Archive). Just refuse.
+        logger.info("Page download: %s is HTML-paywall host — refusing to save captcha/login content", url)
+        _record_failure(status_out, None, "html_paywall",
+                        "publisher serves a paywall/login wall for HTML")
+        return False
     from download_rules import is_js_challenge
     if is_js_challenge(url):
         logger.debug("Page download: %s is JS-challenge host, going straight to heavy fallback", url)
