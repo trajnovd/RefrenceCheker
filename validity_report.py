@@ -45,6 +45,29 @@ SEVERITY_ORDER = [
 ]
 _SEVERITY_RANK = {s: i for i, s in enumerate(SEVERITY_ORDER)}
 
+# v6.1 §12.5 — per-tier explainer shown when a non-`direct` tier delivered
+# the PDF. Rendered as a small info banner inside the Downloaded source block.
+TIER_EXPLAINERS = {
+    "wayback":         "historic Web Archive snapshot — may be outdated",
+    "openreview":      "OpenReview accepted submission — may differ from camera-ready",
+    "oa_fallbacks":    "alternate open-access mirror via Unpaywall/OpenAlex",
+    "doi_negotiation": "direct PDF via DOI content negotiation",
+    "core":            "institutional-repository copy via CORE aggregator",
+    "hal":             "HAL open-access archive",
+    "pmc":             "PubMed Central open-access copy",
+    "nber":            "NBER working-paper PDF",
+    "repec":           "RePEc mirror",
+    "zenodo":          "Zenodo research archive",
+    "osf":             "OSF Preprints",
+    "curl_cffi":       "fetched with browser TLS impersonation (site bot-blocked default fetch)",
+    "playwright":      "captured via headless browser (site needs JS rendering)",
+    "manual_set_link": "manually set by you via Set Link",
+    "manual_upload":   "manually uploaded by you",
+    "manual_paste":    "manually pasted by you",
+    "direct":          None,
+}
+
+
 # Display metadata per severity. Drives badges + suggested-fix text.
 SEVERITY_META = {
     "parse_error":          {"emoji": "🚫", "label": "BIB PARSE ERROR",
@@ -389,6 +412,40 @@ def _file_links_html(files, slug):
     return " · ".join(parts)
 
 
+def _download_log_trace_html(log):
+    """v6.1 §11.11 + §12.3 — collapsed per-tier trace for failed-download
+    debugging. Returns empty string when no log or the log is only a single
+    successful 'direct' attempt (most common case)."""
+    if not log or (len(log) == 1 and log[0].get("ok") and log[0].get("tier") == "direct"):
+        return ""
+    lines = []
+    lines.append('<details class="src__log"><summary>'
+                 + str(len(log)) + ' download attempt' + ("s" if len(log) != 1 else "")
+                 + ' (click to expand)</summary>')
+    lines.append('<table class="src__log-table">')
+    for entry in log:
+        ok = entry.get("ok")
+        icon = "✓" if ok else "✗"
+        cls = "ok" if ok else "fail"
+        tier = _esc(entry.get("tier") or "?")
+        status = entry.get("http_status")
+        kind = entry.get("kind") or ""
+        elapsed = entry.get("elapsed_ms") or 0
+        url = entry.get("final_url") or ""
+        reason = (f"HTTP {status}" if status else "") + (f" {kind}" if kind else "")
+        lines.append(
+            f'<tr class="src__log-row src__log-row--{cls}">'
+            f'<td class="src__log-icon">{icon}</td>'
+            f'<td class="src__log-tier">{tier}</td>'
+            f'<td class="src__log-reason">{_esc(reason.strip() or "ok")}</td>'
+            f'<td class="src__log-elapsed">{elapsed} ms</td>'
+            f'<td class="src__log-url">' + (f'<a href="{_esc(url)}" target="_blank" rel="noopener">{_esc(url[:60])}</a>' if url else '') + '</td>'
+            f'</tr>'
+        )
+    lines.append('</table></details>')
+    return "".join(lines)
+
+
 def _identity_block_html(rm):
     """Render the identity check as two colored pills (TITLE OK / DOES NOT MATCH
     and AUTHORS OK / DO NOT MATCH) plus the LLM evidence on a new row.
@@ -516,6 +573,22 @@ def _citation_block_html(row, position, total, project_dir, tex_content,
                 ref.get("status") or "", ref.get("status") or "?")
             remote = ref.get("pdf_url") or ref.get("url") or ""
             sources = ", ".join(ref.get("sources") or [])
+            # v6.1 §12.5 — tier + explainer + optional download log trace
+            pdf_origin = (ref.get("files_origin") or {}).get("pdf") or {}
+            tier = pdf_origin.get("tier")
+            tier_line = ""
+            if tier:
+                when = (pdf_origin.get("captured_at") or "")[:10]  # YYYY-MM-DD
+                tier_line = (
+                    '<div class="src__line src__tier"><strong>Downloaded via:</strong> '
+                    + _esc(tier)
+                    + (' · ' + _esc(when) if when else '')
+                    + '</div>'
+                )
+                explainer = TIER_EXPLAINERS.get(tier)
+                if explainer:
+                    tier_line += ('<div class="src__explainer">ℹ '
+                                    + _esc(explainer) + '</div>')
             src_html = (
                 '<div class="src__line"><strong>Source:</strong> '
                 + _esc(type_label)
@@ -523,8 +596,10 @@ def _citation_block_html(row, position, total, project_dir, tex_content,
                    + _esc(remote) + '</a>' if remote else '')
                 + (' · sources used: ' + _esc(sources) if sources else '')
                 + '</div>'
+                + tier_line
                 + '<div class="src__line"><strong>Local files:</strong> '
                 + _file_links_html(ref.get("files"), slug) + '</div>'
+                + _download_log_trace_html(ref.get("download_log"))
             )
     else:
         src_html = '<div class="src__line src__missing">No reference data — citation key not found in .bib.</div>'
@@ -803,6 +878,22 @@ a { color: #1d4ed8; }
 .src-link:hover { background: #e0e7ff; }
 .src-link__label { font-weight: 700; }
 .src-link__name  { font-family: ui-monospace, monospace; font-size: 0.78rem; opacity: 0.8; }
+
+.src__tier { margin-top: 0.2rem; }
+.src__explainer { margin-top: 0.2rem; padding: 0.3rem 0.6rem;
+                   background: #eff6ff; border-left: 3px solid #3b82f6;
+                   font-size: 0.82rem; color: #1e3a8a; }
+.src__log { margin-top: 0.4rem; }
+.src__log summary { cursor: pointer; color: #6b7280; font-size: 0.82rem; padding: 0.2rem 0; }
+.src__log-table { width: 100%; border-collapse: collapse; font-size: 0.76rem;
+                   margin-top: 0.3rem; font-family: ui-monospace, monospace; }
+.src__log-row--ok   .src__log-icon   { color: #047857; font-weight: 700; }
+.src__log-row--fail .src__log-icon   { color: #b91c1c; font-weight: 700; }
+.src__log-row td { padding: 0.15rem 0.4rem; vertical-align: top;
+                    border-bottom: 1px dashed #e5e7eb; }
+.src__log-tier   { font-weight: 600; }
+.src__log-elapsed{ color: #6b7280; }
+.src__log-url a  { color: #3730a3; }
 
 .check { margin-top: 0.5rem; padding: 0.5rem 0.7rem; border-radius: 4px;
           background: #f9fafb; border-left: 3px solid #94a3b8; }

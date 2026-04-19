@@ -3,6 +3,7 @@ import time
 import logging
 import re
 import requests
+from http_client import get_session
 from bs4 import BeautifulSoup
 from config import SCHOLARLY_ENABLED
 
@@ -143,7 +144,7 @@ def _search_google_scholar(title, timeout):
     url = "https://scholar.google.com/scholar"
     params = {"q": f'"{title}"', "hl": "en", "num": 3}
 
-    resp = requests.get(url, params=params, headers=HEADERS, timeout=timeout)
+    resp = get_session().get(url, params=params, headers=HEADERS, timeout=timeout)
 
     if resp.status_code == 429 or "captcha" in resp.text.lower():
         global _disabled
@@ -164,7 +165,7 @@ def _search_google_scholar(title, timeout):
         logger.debug("Scholarly: no relevant exact-match result, retrying broad: title=%s", title)
         # Try without quotes for a broader search
         params["q"] = title
-        resp = requests.get(url, params=params, headers=HEADERS, timeout=timeout)
+        resp = get_session().get(url, params=params, headers=HEADERS, timeout=timeout)
         if resp.status_code != 200:
             logger.debug("Scholarly broad retry failed: title=%s status=%d", title, resp.status_code)
             return None

@@ -1,6 +1,7 @@
 import re
 import logging
 import requests
+from http_client import get_session
 import xml.etree.ElementTree as ET
 
 logger = logging.getLogger(__name__)
@@ -23,7 +24,7 @@ def search_arxiv(title, max_results=3, timeout=10):
             "max_results": max_results,
             "sortBy": "relevance",
         }
-        resp = requests.get(ARXIV_API, params=params, timeout=timeout)
+        resp = get_session().get(ARXIV_API, params=params, timeout=timeout)
         if resp.status_code != 200:
             logger.debug("arXiv API error: status=%d", resp.status_code)
             return None

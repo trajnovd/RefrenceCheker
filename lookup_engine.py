@@ -60,27 +60,10 @@ def _years_compatible(bib_year, arxiv_year, max_gap=3):
     except (TypeError, ValueError):
         return True
 
-# Publisher domains that bot-block anonymous PDF downloads (Cloudflare / JS challenges,
-# cookie-walled, paywalled with partial OA pretence via Unpaywall, etc.).
-# When Unpaywall/OpenAlex/S2 returns one of these as pdf_url, it's worth asking Google
-# Search for an alternate non-fragile mirror (university .edu, author homepage, arXiv).
-_FRAGILE_PDF_DOMAINS = (
-    "onlinelibrary.wiley.com",
-    "papers.ssrn.com",
-    "econstor.eu",
-    "sciencedirect.com",
-    "link.springer.com",
-    "jstor.org",
-    "tandfonline.com",
-    "academic.oup.com",     # Oxford Academic — Cloudflare-protected like Wiley
-)
-
-
-def _is_fragile_pdf(url):
-    if not url:
-        return False
-    u = url.lower()
-    return any(d in u for d in _FRAGILE_PDF_DOMAINS)
+# Fragile-publisher + non-content domain lists live in download_rules.py
+# (single source of truth — v6.1 A0.3). Re-exported here under the legacy
+# names so existing callers inside this module keep working.
+from download_rules import is_fragile as _is_fragile_pdf  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -190,6 +173,10 @@ def process_reference(ref, metadata_only=False):
         "error": None,
         # Carry raw_bib forward so the BibTeX tab keeps working after Refresh / Add Reference.
         "raw_bib": ref.get("raw_bib"),
+        # v6.1 A0.5: provenance for each downloaded file. A1 tiers call
+        # provenance.record_origin(result, filetype, tier, url) on success;
+        # the UI then shows "Downloaded via <tier>" per artifact.
+        "files_origin": {},
     }
 
     # Step 0: If we have an arXiv ID (from eprint, URL, or DOI), set PDF link immediately
@@ -223,6 +210,9 @@ def process_reference(ref, metadata_only=False):
             result["sources"].append("unpaywall")
             if uw.get("pdf_url"):
                 result["pdf_url"] = uw["pdf_url"]
+            # v6.1 §3.1: collect alternate OA locations for the fallback walker.
+            for u in (uw.get("pdf_url_fallbacks") or []):
+                result.setdefault("pdf_url_fallbacks", []).append(u)
         _log_step(bib_key, "Unpaywall", uw and uw.get("pdf_url"),
                   f"pdf_url={uw.get('pdf_url')}" if uw else "")
 
@@ -235,6 +225,9 @@ def process_reference(ref, metadata_only=False):
         result["doi"] = result["doi"] or oa.get("doi")
         if not result["pdf_url"] and oa.get("pdf_url"):
             result["pdf_url"] = oa["pdf_url"]
+        # v6.1 §3.2: collect alternate OA locations for the fallback walker.
+        for u in (oa.get("pdf_url_fallbacks") or []):
+            result.setdefault("pdf_url_fallbacks", []).append(u)
         if not result["authors"] or result["authors"] == [authors]:
             result["authors"] = oa.get("authors") or result["authors"]
         result["year"] = result["year"] or oa.get("year")

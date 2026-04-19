@@ -14,7 +14,8 @@ def test_crossref_with_valid_doi():
             "URL": "https://doi.org/10.1234/test"
         }
     }
-    with patch("api_clients.crossref.requests.get", return_value=mock_resp):
+    with patch("api_clients.crossref.get_session") as _gs:
+        _gs.return_value.get.return_value = mock_resp
         result = lookup_crossref("10.1234/test")
     assert result["title"] == "Machine Learning Study"
     assert result["authors"] == ["John Smith"]
@@ -24,7 +25,8 @@ def test_crossref_with_valid_doi():
 def test_crossref_with_invalid_doi():
     mock_resp = Mock()
     mock_resp.status_code = 404
-    with patch("api_clients.crossref.requests.get", return_value=mock_resp):
+    with patch("api_clients.crossref.get_session") as _gs:
+        _gs.return_value.get.return_value = mock_resp
         result = lookup_crossref("10.9999/nonexistent")
     assert result is None
 
@@ -47,7 +49,8 @@ def test_unpaywall_finds_oa_pdf():
             "url_for_pdf": "https://example.com/paper.pdf"
         }
     }
-    with patch("api_clients.unpaywall.requests.get", return_value=mock_resp):
+    with patch("api_clients.unpaywall.get_session") as _gs:
+        _gs.return_value.get.return_value = mock_resp
         result = lookup_unpaywall("10.1234/test")
     assert result["pdf_url"] == "https://example.com/paper.pdf"
     assert result["is_oa"] is True
@@ -60,7 +63,8 @@ def test_unpaywall_no_oa():
         "is_oa": False,
         "best_oa_location": None
     }
-    with patch("api_clients.unpaywall.requests.get", return_value=mock_resp):
+    with patch("api_clients.unpaywall.get_session") as _gs:
+        _gs.return_value.get.return_value = mock_resp
         result = lookup_unpaywall("10.1234/test")
     assert result["pdf_url"] is None
 
@@ -68,7 +72,8 @@ def test_unpaywall_no_oa():
 def test_unpaywall_not_found():
     mock_resp = Mock()
     mock_resp.status_code = 404
-    with patch("api_clients.unpaywall.requests.get", return_value=mock_resp):
+    with patch("api_clients.unpaywall.get_session") as _gs:
+        _gs.return_value.get.return_value = mock_resp
         result = lookup_unpaywall("10.9999/fake")
     assert result is None
 
@@ -90,7 +95,8 @@ def test_s2_search_by_doi():
         "authors": [{"name": "John Smith"}],
         "externalIds": {"DOI": "10.1234/test"}
     }
-    with patch("api_clients.semantic_scholar.requests.get", return_value=mock_resp):
+    with patch("api_clients.semantic_scholar.get_session") as _gs:
+        _gs.return_value.get.return_value = mock_resp
         result = lookup_semantic_scholar(doi="10.1234/test")
     assert result["abstract"] == "This paper studies ML."
     assert result["pdf_url"] == "https://example.com/paper.pdf"
@@ -114,7 +120,8 @@ def test_s2_search_by_title():
             "externalIds": {"DOI": "10.1234/test"}
         }]
     }
-    with patch("api_clients.semantic_scholar.requests.get", return_value=match_resp):
+    with patch("api_clients.semantic_scholar.get_session") as _gs:
+        _gs.return_value.get.return_value = match_resp
         result = lookup_semantic_scholar(title="Machine Learning Study", year="2020")
     assert result["abstract"] == "This paper studies ML."
 
@@ -122,7 +129,8 @@ def test_s2_search_by_title():
 def test_s2_not_found():
     mock_resp = Mock()
     mock_resp.status_code = 404
-    with patch("api_clients.semantic_scholar.requests.get", return_value=mock_resp):
+    with patch("api_clients.semantic_scholar.get_session") as _gs:
+        _gs.return_value.get.return_value = mock_resp
         result = lookup_semantic_scholar(doi="10.9999/fake")
     assert result is None
 
@@ -143,7 +151,8 @@ def test_scholarly_finds_paper():
     mock_resp = Mock()
     mock_resp.status_code = 200
     mock_resp.text = html
-    with patch("api_clients.scholarly_client.requests.get", return_value=mock_resp):
+    with patch("api_clients.scholarly_client.get_session") as _gs:
+        _gs.return_value.get.return_value = mock_resp
         result = lookup_scholarly("Machine Learning Study")
     assert result is not None
     assert result["title"] == "Machine Learning Study"
@@ -156,7 +165,8 @@ def test_scholarly_no_results():
     mock_resp = Mock()
     mock_resp.status_code = 200
     mock_resp.text = '<html><body></body></html>'
-    with patch("api_clients.scholarly_client.requests.get", return_value=mock_resp):
+    with patch("api_clients.scholarly_client.get_session") as _gs:
+        _gs.return_value.get.return_value = mock_resp
         result = lookup_scholarly("Nonexistent Paper XYZ123")
     assert result is None
 

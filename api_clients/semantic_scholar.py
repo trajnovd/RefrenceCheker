@@ -3,6 +3,7 @@ import time
 import re
 import logging
 import requests
+from http_client import get_session
 from config import SEMANTIC_SCHOLAR_API_KEY
 
 logger = logging.getLogger(__name__)
@@ -87,7 +88,7 @@ def _lookup_by_doi(doi, timeout, max_retries):
     for attempt in range(max_retries):
         try:
             _rate_limit()
-            resp = requests.get(url, params=params, headers=_HEADERS, timeout=timeout)
+            resp = get_session().get(url, params=params, headers=_HEADERS, timeout=timeout)
             logger.debug("S2 DOI response: status=%d doi=%s", resp.status_code, doi)
             if resp.status_code == 429:
                 _handle_429(attempt)
@@ -130,7 +131,7 @@ def _lookup_by_title(title, year, authors_hint, timeout, max_retries):
     for attempt in range(max_retries):
         try:
             _rate_limit()
-            resp = requests.get(url, params=params, headers=_HEADERS, timeout=timeout)
+            resp = get_session().get(url, params=params, headers=_HEADERS, timeout=timeout)
             logger.debug("S2 title response: status=%d title=%s", resp.status_code, title)
             if resp.status_code == 429:
                 _handle_429(attempt)
@@ -184,7 +185,7 @@ def _search_by_title(title, year, authors_hint, timeout, max_retries):
     for attempt in range(max_retries):
         try:
             _rate_limit()
-            resp = requests.get(url, params=params, headers=_HEADERS, timeout=timeout)
+            resp = get_session().get(url, params=params, headers=_HEADERS, timeout=timeout)
             logger.debug("S2 search response: status=%d title=%s", resp.status_code, title)
             if resp.status_code == 429:
                 _handle_429(attempt)

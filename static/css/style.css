@@ -1444,6 +1444,36 @@ h1, h2, h3, h4 {
 .status-badge--match-unverifiable { background: #fef3c7; color: #92400e; }
 .status-badge--match-unchecked    { background: #f3f4f6; color: #6b7280; }
 
+/* v6.1 Phase D — download-tier badge (which fallback delivered the PDF). */
+.tier-badge {
+  display: inline-flex; align-items: center; gap: 0.2rem;
+  padding: 0.15rem 0.55rem; border-radius: 999px;
+  font-size: 0.72rem; font-weight: 700;
+  text-transform: none; letter-spacing: 0;
+  cursor: help;
+}
+.tier-badge--green  { background: #d1fae5; color: #065f46; border: 1px solid #a7f3d0; }
+.tier-badge--blue   { background: #dbeafe; color: #1e3a8a; border: 1px solid #93c5fd; }
+.tier-badge--amber  { background: #fef3c7; color: #92400e; border: 1px solid #fcd34d; }
+.tier-badge--purple { background: #ede9fe; color: #5b21b6; border: 1px solid #c4b5fd; }
+.tier-badge--gray   { background: #f3f4f6; color: #4b5563; border: 1px solid #d1d5db; }
+
+/* v6.1 Phase D — Top blocked hosts dashboard card */
+.dash-panel__hint { color: #6b7280; font-size: 0.78rem; font-weight: 400; margin-left: 0.4rem; }
+.dash-blocked-hosts { display: flex; flex-direction: column; gap: 0.3rem; }
+.dash-blocked-row {
+  display: grid; grid-template-columns: 1fr auto 2fr;
+  gap: 0.6rem; align-items: center;
+  padding: 0.4rem 0.6rem; background: #fef2f2;
+  border-left: 3px solid #ef4444; border-radius: 0 4px 4px 0;
+  font-size: 0.88rem;
+}
+.dash-blocked-row__host { font-family: ui-monospace, monospace; color: #7f1d1d; font-weight: 600; }
+.dash-blocked-row__count { color: #4b5563; }
+.dash-blocked-row__hint { color: #1f2937; }
+.dash-blocked-row code { background: #fff; padding: 0 0.25rem; border-radius: 3px;
+                         font-size: 0.85em; color: #b45309; }
+
 /* PDF tab footer — remote source link shown below the iframe */
 .review-pdf-footer {
   flex-shrink: 0;

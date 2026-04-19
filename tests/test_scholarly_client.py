@@ -9,9 +9,21 @@ the citation source.
 from unittest.mock import patch, MagicMock
 import pytest
 
+from api_clients import scholarly_client as _sch
 from api_clients.scholarly_client import (
     _is_relevant, _normalize, _pick_relevant, _parse_scholar_result,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_scholarly_module_state():
+    """Module-level _disabled / _consecutive_failures can leak across tests
+    when an earlier test triggers the disable path. Reset before each."""
+    _sch._disabled = False
+    _sch._consecutive_failures = 0
+    yield
+    _sch._disabled = False
+    _sch._consecutive_failures = 0
 
 
 # ============================================================

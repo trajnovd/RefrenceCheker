@@ -1,5 +1,6 @@
 import logging
 import requests
+from http_client import get_session
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +33,7 @@ def lookup_wikipedia(title, authors=None, timeout=10):
     }
 
     try:
-        resp = requests.get(API_URL, params=search_params, headers=_HEADERS, timeout=timeout)
+        resp = get_session().get(API_URL, params=search_params, headers=_HEADERS, timeout=timeout)
         if resp.status_code != 200:
             logger.debug("Wikipedia search failed: status=%d body=%s", resp.status_code, resp.text[:200])
             return None
@@ -79,7 +80,7 @@ def lookup_wikipedia(title, authors=None, timeout=10):
             "format": "json",
         }
 
-        resp = requests.get(API_URL, params=extract_params, headers=_HEADERS, timeout=timeout)
+        resp = get_session().get(API_URL, params=extract_params, headers=_HEADERS, timeout=timeout)
         if resp.status_code != 200:
             logger.debug("Wikipedia extract failed: page_id=%d status=%d", page_id, resp.status_code)
             return None

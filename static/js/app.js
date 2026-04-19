@@ -419,6 +419,12 @@
       { dot: 'notfound', label: 'Identity unchecked',   count: rmStats.unchecked,    total: results.length },
     ]);
 
+    // ---- Top blocked hosts (v6.1 Phase D) ----
+    // Fire off async stats fetch; the card stays hidden when there are no
+    // failed downloads. Deliberately out-of-band from the dashboard render
+    // so a slow stats API doesn't delay the main view.
+    _loadBlockedHostsCard(proj.slug);
+
     // ---- Citation breakdown ----
     _renderDashBreakdown('dash-cite-breakdown', [
       { dot: 'supported',     label: 'Supported',       count: verdictBuckets.supported,     total: citations.length },
@@ -474,6 +480,46 @@
     var pct = total > 0 ? Math.round((value / total) * 100) : 0;
     fill.style.width = pct + '%';
     fill.className = 'dash-status__fill' + (variant === 'warn' ? ' dash-status__fill--warn' : '');
+  }
+
+  // v6.1 Phase D — Top blocked hosts card. Shows hosts that failed to
+  // download along with a suggested tier (curl_cffi / playwright / manual).
+  function _loadBlockedHostsCard(slug) {
+    if (!slug) return;
+    var card = el('dash-blocked-hosts-card');
+    var list = el('dash-blocked-hosts-list');
+    if (!card || !list) return;
+    fetch('/api/projects/' + encodeURIComponent(slug) + '/download-stats')
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        var top = (data && data.stats && data.stats.top_blocked) || [];
+        if (!top.length) { card.style.display = 'none'; return; }
+        list.innerHTML = '';
+        top.forEach(function (item) {
+          var row = document.createElement('div');
+          row.className = 'dash-blocked-row';
+          var hostSpan = '<span class="dash-blocked-row__host">' +
+                        escapeHtml(item.host) + '</span>';
+          var countSpan = '<span class="dash-blocked-row__count">' +
+                         item.refs + ' ref' + (item.refs === 1 ? '' : 's') + '</span>';
+          var hint = _blockedSuggestionText(item.suggested);
+          row.innerHTML = hostSpan + countSpan +
+                          '<span class="dash-blocked-row__hint">' + hint + '</span>';
+          list.appendChild(row);
+        });
+        card.style.display = '';
+      })
+      .catch(function () { card.style.display = 'none'; });
+  }
+
+  function _blockedSuggestionText(suggested) {
+    if (suggested === 'curl_cffi') {
+      return '→ enable <code>curl_cffi</code> tier in settings (Phase B, ~200 MB dep)';
+    }
+    if (suggested === 'playwright') {
+      return '→ enable <code>playwright</code> tier in settings (Phase C, ~400 MB dep)';
+    }
+    return '→ use Upload PDF or Paste Content';
   }
 
   function _renderDashIssues(items) {
@@ -659,6 +705,17 @@
     var rmBadge = _matchSummary(result.ref_match);
     html += '<span class="status-badge status-badge--match-' + rmBadge.cls + '" title="' +
             escapeHtml(rmBadge.title) + '">Match ' + escapeHtml(rmBadge.label) + '</span>';
+    // v6.1 Phase D — tier badge showing which download tier delivered the PDF.
+    var pdfOrigin = (result.files_origin || {}).pdf;
+    if (pdfOrigin && pdfOrigin.tier) {
+      var tierCls = _tierBadgeClass(pdfOrigin.tier);
+      var tierTitle = 'Downloaded via ' + pdfOrigin.tier +
+                      (pdfOrigin.captured_at ? ' · ' + pdfOrigin.captured_at.split('T')[0] : '') +
+                      (pdfOrigin.url ? '\n' + pdfOrigin.url : '');
+      html += '<span class="tier-badge tier-badge--' + tierCls +
+              '" title="' + escapeHtml(tierTitle) + '">via ' +
+              escapeHtml(_tierLabel(pdfOrigin.tier)) + '</span>';
+    }
     if (result.sources && result.sources.length) {
       result.sources.forEach(function (src) {
         html += '<span class="source-badge">' + escapeHtml(src) + '</span>';
@@ -1522,6 +1579,71 @@
       listEl.appendChild(card);
     });
   }
+
+  // v6.1 Phase D — download-tier badge helpers.
+  // Groups tiers by category so the badge color is meaningful at a glance.
+  var _TIER_CATEGORIES = {
+    direct:          'green',
+    oa_fallbacks:    'green',
+    doi_negotiation: 'green',
+    openreview:      'green',
+    pmc:             'green',
+    nber:            'green',
+    repec:           'blue',
+    core:            'blue',
+    hal:             'blue',
+    zenodo:          'blue',
+    osf:             'blue',
+    wayback:         'blue',
+    curl_cffi:       'amber',
+    playwright:      'amber',
+    manual_set_link: 'purple',
+    manual_upload:   'purple',
+    manual_paste:    'purple',
+  };
+  var _TIER_LABELS = {
+    direct:          'direct',
+    oa_fallbacks:    'OA mirror',
+    doi_negotiation: 'DOI',
+    openreview:      'OpenReview',
+    pmc:             'PMC',
+    nber:            'NBER',
+    repec:           'RePEc',
+    core:            'CORE',
+    hal:             'HAL',
+    zenodo:          'Zenodo',
+    osf:             'OSF',
+    wayback:         'Wayback',
+    curl_cffi:       'curl_cffi',
+    playwright:      'Playwright',
+    manual_set_link: 'manual link',
+    manual_upload:   'uploaded',
+    manual_paste:    'pasted',
+  };
+  function _tierBadgeClass(tier) { return _TIER_CATEGORIES[tier] || 'gray'; }
+  function _tierLabel(tier)      { return _TIER_LABELS[tier] || tier; }
+
+  // Short, human explainer per tier — used in the validity report + right-panel
+  // footer as a one-line "why this source" hint.
+  var _TIER_EXPLAINERS = {
+    wayback:         'historic Web Archive snapshot — may be outdated',
+    openreview:      'OpenReview accepted submission — may differ from camera-ready',
+    oa_fallbacks:    'alternate open-access mirror via Unpaywall/OpenAlex',
+    doi_negotiation: 'direct PDF via DOI content negotiation',
+    core:            'institutional-repository copy via CORE aggregator',
+    hal:             'HAL open-access archive',
+    pmc:             'PubMed Central open-access copy',
+    nber:            'NBER working-paper PDF',
+    repec:           'RePEc mirror',
+    zenodo:          'Zenodo research archive',
+    osf:             'OSF Preprints',
+    curl_cffi:       'fetched with browser TLS impersonation (site bot-blocked default fetch)',
+    playwright:      'captured via headless browser (site needs JS rendering)',
+    manual_set_link: 'manually set by you via Set Link',
+    manual_upload:   'manually uploaded by you',
+    manual_paste:    'manually pasted by you',
+    direct:          null,  // no banner for direct — the default
+  };
 
   // Reference identity match — short label/icon for the card.
   function _matchSummary(match) {

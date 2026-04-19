@@ -283,6 +283,80 @@ def get_ref_match(slug, bib_key):
     return None
 
 
+# ============================================================
+# Download telemetry (v6.1 A3)
+# ============================================================
+
+def compute_download_stats(slug):
+    """Aggregate per-tier + per-host download stats from all results in a project.
+
+    Returns:
+        {
+          "total_attempts": int,
+          "per_tier":      {tier_name: count},      # successful downloads
+          "failed_by_host":{host: count},           # hosts with a failed attempt
+          "top_blocked":   [{"host": ..., "refs": n, "suggested": "curl_cffi"}, ...]
+        }
+
+    Reads `result.download_log` (list of per-tier attempts, v6.1 §11.11) and
+    `result.files_origin.pdf` (winning-tier stamp). Suggested-tier mapping is
+    deterministic: SSRN / ResearchGate / econstor → curl_cffi; EUR-Lex /
+    Elsevier portal → playwright; others → "manual upload".
+    """
+    data = _read_json(slug)
+    if data is None:
+        return None
+    per_tier = {}
+    failed_by_host = {}
+    total_attempts = 0
+    for r in data.get("results") or []:
+        # Winning tier
+        origin = (r.get("files_origin") or {}).get("pdf")
+        if origin and origin.get("tier"):
+            per_tier[origin["tier"]] = per_tier.get(origin["tier"], 0) + 1
+        # All attempts → telemetry on failures
+        for entry in (r.get("download_log") or []):
+            total_attempts += 1
+            if entry.get("ok"):
+                continue
+            url = entry.get("final_url") or ""
+            # Extract host for failed attempts
+            try:
+                from urllib.parse import urlparse
+                host = (urlparse(url).hostname or "").lower() if url else ""
+            except Exception:
+                host = ""
+            if host:
+                failed_by_host[host] = failed_by_host.get(host, 0) + 1
+    # Build top_blocked with actionable suggestion
+    top_blocked = []
+    for host, n in sorted(failed_by_host.items(), key=lambda kv: -kv[1])[:5]:
+        top_blocked.append({
+            "host": host, "refs": n,
+            "suggested": _suggest_tier_for(host),
+        })
+    return {
+        "total_attempts": total_attempts,
+        "per_tier": per_tier,
+        "failed_by_host": failed_by_host,
+        "top_blocked": top_blocked,
+    }
+
+
+def _suggest_tier_for(host):
+    """Map a blocked host to a suggested v6.1 tier."""
+    h = (host or "").lower()
+    # TLS-impersonation targets
+    if any(k in h for k in ("ssrn.com", "researchgate.net", "econstor.eu",
+                             "sciencedirect.com", "wiley.com", "oup.com",
+                             "springer.com", "jstor.org", "tandfonline.com")):
+        return "curl_cffi"
+    # JS-challenge targets
+    if any(k in h for k in ("eur-lex.europa.eu", "europa.eu", "elsevier.com")):
+        return "playwright"
+    return "manual_upload"
+
+
 def set_last_viewed_citation(slug, citation_index):
     lock = _get_lock(slug)
     with lock:

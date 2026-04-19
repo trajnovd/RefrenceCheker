@@ -41,7 +41,17 @@ _DEFAULT_SETTINGS = {
     #     }
     #   }
     "download": {
-        "site_rules": {}
+        "site_rules": {},
+        # v6.1 Phase B — curl_cffi (opt-in; requires `pip install curl_cffi`)
+        "use_curl_cffi_fallback": False,
+        "curl_cffi_impersonate":  "chrome120",
+        "curl_cffi_timeout_s":    30,
+        # v6.1 Phase C — Playwright (opt-in; requires `pip install playwright`
+        # AND `playwright install chromium`)
+        "use_playwright_fallback": False,
+        "playwright_pool_size":    1,
+        "playwright_timeout_s":    30,
+        "playwright_html_to_pdf":  True,
     },
 
     # --- LLM claim checking ---

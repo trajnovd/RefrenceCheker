@@ -160,7 +160,9 @@ class TestDownloadFailureClassification:
 
     def test_pdf_4xx_classification(self, tmp_path):
         from file_downloader import _download_pdf
-        with patch("file_downloader.requests.get") as mock_get:
+        with patch("file_downloader.get_session") as mock_session:
+            mock_get = MagicMock()
+            mock_session.return_value.get = mock_get
             resp = MagicMock()
             resp.status_code = 403
             mock_get.return_value = resp
@@ -173,7 +175,9 @@ class TestDownloadFailureClassification:
 
     def test_pdf_5xx_classification(self, tmp_path):
         from file_downloader import _download_pdf
-        with patch("file_downloader.requests.get") as mock_get:
+        with patch("file_downloader.get_session") as mock_session:
+            mock_get = MagicMock()
+            mock_session.return_value.get = mock_get
             resp = MagicMock()
             resp.status_code = 503
             mock_get.return_value = resp
@@ -186,8 +190,8 @@ class TestDownloadFailureClassification:
     def test_pdf_network_error_classification(self, tmp_path):
         from file_downloader import _download_pdf
         import requests
-        with patch("file_downloader.requests.get",
-                   side_effect=requests.ConnectionError("DNS failure")):
+        with patch("file_downloader.get_session") as mock_session:
+            mock_session.return_value.get.side_effect = requests.ConnectionError("DNS failure")
             status = {}
             ok = _download_pdf("https://example.com/x.pdf",
                                str(tmp_path / "out.pdf"), status_out=status)
@@ -197,7 +201,9 @@ class TestDownloadFailureClassification:
 
     def test_page_4xx_classification(self, tmp_path):
         from file_downloader import _download_page
-        with patch("file_downloader.requests.get") as mock_get:
+        with patch("file_downloader.get_session") as mock_session:
+            mock_get = MagicMock()
+            mock_session.return_value.get = mock_get
             resp = MagicMock()
             resp.status_code = 404
             mock_get.return_value = resp
@@ -211,7 +217,9 @@ class TestDownloadFailureClassification:
     def test_pdf_validation_failure_when_not_a_pdf(self, tmp_path):
         """Server returned 200 with non-PDF content (e.g. HTML error page)."""
         from file_downloader import _download_pdf
-        with patch("file_downloader.requests.get") as mock_get:
+        with patch("file_downloader.get_session") as mock_session:
+            mock_get = MagicMock()
+            mock_session.return_value.get = mock_get
             resp = MagicMock()
             resp.status_code = 200
             resp.headers = {}

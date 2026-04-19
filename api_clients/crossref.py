@@ -2,6 +2,7 @@ import threading
 import time
 import logging
 import requests
+from http_client import get_session
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +27,7 @@ def lookup_crossref(doi, timeout=10, max_retries=3):
     for attempt in range(max_retries):
         try:
             _rate_limit()
-            resp = requests.get(url, timeout=timeout)
+            resp = get_session().get(url, timeout=timeout)
             logger.debug("CrossRef response: status=%d doi=%s", resp.status_code, doi)
             if resp.status_code == 429:
                 logger.debug("CrossRef rate-limited (429): doi=%s attempt=%d", doi, attempt)

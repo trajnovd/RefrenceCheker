@@ -58,20 +58,33 @@ def _wipe_reference_artifacts(project_dir, bib_key):
                 pass
 
 
-def _maybe_auto_check_ref_match(slug, bib_key):
+def _maybe_auto_check_ref_match(slug, bib_key, previous_tier=None):
     """Fire-and-forget: kick off a single reference-match check in the background.
 
     Honors settings.reference_match.enabled + .auto_check_on_download. Quietly
     no-ops if the OpenAI key is missing — the user can still trigger the check
     manually via the dashboard. Errors are swallowed (logged) so download paths
     are never broken by a match-check failure.
+
+    v6.1 A3: if `previous_tier` is given and differs from the current tier on
+    result.files_origin.pdf, force re-check even if auto_check_on_download is
+    off — a tier change means a potentially different paper (Wayback snapshot,
+    OpenReview preprint, alt mirror). Manual verdicts remain sticky.
     """
     try:
         from config import get_reference_match_settings, get_openai_api_key
         s = get_reference_match_settings()
-        if not s.get("enabled") or not s.get("auto_check_on_download"):
-            return
         if not get_openai_api_key():
+            return
+        force_recheck = False
+        if previous_tier is not None:
+            # Read the current tier after the download completed
+            current_tier = _current_pdf_tier(slug, bib_key)
+            if current_tier and current_tier != previous_tier:
+                force_recheck = True
+                logger.info("[%s/%s] pdf tier changed %s -> %s; forcing ref-match recheck",
+                             slug, bib_key, previous_tier, current_tier)
+        if not force_recheck and not (s.get("enabled") and s.get("auto_check_on_download")):
             return
     except Exception:
         return
@@ -84,6 +97,20 @@ def _maybe_auto_check_ref_match(slug, bib_key):
             logger.debug("auto ref-match for %s/%s failed: %s", slug, bib_key, e)
 
     threading.Thread(target=_run, daemon=True).start()
+
+
+def _current_pdf_tier(slug, bib_key):
+    """Read result.files_origin.pdf.tier for a bib_key. Returns None if missing."""
+    try:
+        proj = project_store.get_project(slug)
+        if not proj:
+            return None
+        for r in proj.get("results") or []:
+            if r.get("bib_key") == bib_key:
+                return ((r.get("files_origin") or {}).get("pdf") or {}).get("tier")
+    except Exception:
+        pass
+    return None
 
 
 def create_app():
@@ -279,6 +306,10 @@ def create_app():
 
         def _do_refresh():
             try:
+                # Capture the previous tier before we overwrite the result, so
+                # A3 can detect a tier change and force a ref-match recheck.
+                previous_tier = _current_pdf_tier(slug, bib_key)
+
                 # Try bib URL first; if it works, only fetch metadata from APIs
                 from file_downloader import pre_download_bib_url
                 bib_url = ref.get("url")
@@ -306,7 +337,7 @@ def create_app():
                 with _refresh_lock:
                     _refresh_status[status_key] = result
                 if (result.get("files") or {}).get("md"):
-                    _maybe_auto_check_ref_match(slug, bib_key)
+                    _maybe_auto_check_ref_match(slug, bib_key, previous_tier=previous_tier)
             except Exception as e:
                 logger.error("Refresh failed for %s/%s: %s", slug, bib_key, e)
                 with _refresh_lock:
@@ -1458,6 +1489,15 @@ def create_app():
     # Validity report (HTML + references.zip bundle)
     # See validity_report_v1.md for spec.
     # ================================================================
+
+    @app.route("/api/projects/<slug>/download-stats", methods=["GET"])
+    def api_download_stats(slug):
+        """v6.1 A3: aggregate per-tier + per-host download telemetry for the
+        project dashboard. Feeds the Top Blocked Hosts card."""
+        stats = project_store.compute_download_stats(slug)
+        if stats is None:
+            return jsonify({"error": "Project not found"}), 404
+        return jsonify({"ok": True, "stats": stats})
 
     @app.route("/api/projects/<slug>/validity-report", methods=["POST"])
     def api_build_validity_report(slug):

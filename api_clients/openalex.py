@@ -1,6 +1,7 @@
 import re
 import logging
 import requests
+from http_client import get_session
 from config import OPENALEX_API_KEY
 
 logger = logging.getLogger(__name__)
@@ -53,7 +54,7 @@ def _parse_work(data):
     # Abstract
     abstract = _reconstruct_abstract(data.get("abstract_inverted_index"))
 
-    # PDF URL — check multiple locations
+    # PDF URL — primary / best_oa / oa_url fallback chain
     pdf_url = None
     primary = data.get("primary_location") or {}
     if primary.get("pdf_url"):
@@ -67,12 +68,21 @@ def _parse_work(data):
         if oa.get("oa_url"):
             pdf_url = oa["oa_url"]
 
+    # v6.1 §3.2: surface ALL `locations[].pdf_url` as an ordered fallback
+    # list. Orchestrator walks these when the primary 403s.
+    pdf_url_fallbacks = []
+    for loc in (data.get("locations") or []):
+        u = (loc.get("pdf_url") if isinstance(loc, dict) else None)
+        if u and u not in pdf_url_fallbacks:
+            pdf_url_fallbacks.append(u)
+
     return {
         "title": title,
         "abstract": abstract,
         "year": str(year) if year else None,
         "citation_count": cited_by,
         "pdf_url": pdf_url,
+        "pdf_url_fallbacks": pdf_url_fallbacks,
         "authors": authors,
         "doi": doi,
     }
@@ -121,8 +131,8 @@ def _lookup_by_doi(doi, timeout):
     try:
         url = f"{BASE_URL}/works/doi:{doi}"
         params = dict(_PARAMS)
-        params["select"] = "id,doi,title,display_name,publication_year,cited_by_count,authorships,abstract_inverted_index,primary_location,best_oa_location,open_access"
-        resp = requests.get(url, params=params, timeout=timeout)
+        params["select"] = "id,doi,title,display_name,publication_year,cited_by_count,authorships,abstract_inverted_index,primary_location,best_oa_location,locations,open_access"
+        resp = get_session().get(url, params=params, timeout=timeout)
         if resp.status_code == 200:
             return _parse_work(resp.json())
         logger.debug("OpenAlex DOI miss: doi=%s status=%d", doi, resp.status_code)
@@ -138,8 +148,8 @@ def _search_by_title(title, year, timeout):
         params = dict(_PARAMS)
         params["search"] = title
         params["per_page"] = 5
-        params["select"] = "id,doi,title,display_name,publication_year,cited_by_count,authorships,abstract_inverted_index,primary_location,best_oa_location,open_access"
-        resp = requests.get(url, params=params, timeout=timeout)
+        params["select"] = "id,doi,title,display_name,publication_year,cited_by_count,authorships,abstract_inverted_index,primary_location,best_oa_location,locations,open_access"
+        resp = get_session().get(url, params=params, timeout=timeout)
         if resp.status_code != 200:
             logger.debug("OpenAlex search error: status=%d", resp.status_code)
             return None

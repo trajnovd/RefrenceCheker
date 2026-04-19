@@ -3,6 +3,7 @@ import time
 import re
 import logging
 import requests
+from http_client import get_session
 from config import GOOGLE_API_KEY, GOOGLE_CSE_ID
 
 logger = logging.getLogger(__name__)
@@ -16,48 +17,13 @@ _disabled = False
 
 SEARCH_URL = "https://www.googleapis.com/customsearch/v1"
 
-# Domains whose pages contain no useful reference content (product listings,
-# catalogs, shopping sites). Results on these domains are skipped entirely —
-# they waste the .md build and mislead claim-checking if saved as "the source."
-_NONCONTENT_DOMAINS = (
-    "amazon.", "goodreads.com", "barnesandnoble.com", "books-a-million.com",
-    "ebay.", "abebooks.", "alibris.", "walmart.com", "waterstones.com",
-    "bookdepository.com", "target.com",
-)
-
-# Publisher domains that bot-block PDF downloads. We don't want Google Search to
-# "discover" these as pdf_url candidates — even if they rank #1, the download
-# will fail and we'll have to retry. Falling through to non-fragile alternates
-# (university pages, NBER, author homepages) gives a downloadable PDF.
-# IMPORTANT: keep this list in sync with lookup_engine._FRAGILE_PDF_DOMAINS.
-_FRAGILE_PDF_DOMAINS = (
-    "onlinelibrary.wiley.com",
-    "papers.ssrn.com",
-    "econstor.eu",
-    "sciencedirect.com",
-    "link.springer.com",
-    "jstor.org",
-    "tandfonline.com",
-    "academic.oup.com",
-)
-
-
-def _is_fragile_pdf_url(url):
-    if not url:
-        return False
-    u = url.lower()
-    return any(d in u for d in _FRAGILE_PDF_DOMAINS)
-
-
-def _is_noncontent_url(url):
-    if not url:
-        return True
-    try:
-        from urllib.parse import urlparse
-        host = (urlparse(url).hostname or "").lower()
-    except Exception:
-        return False
-    return any(d in host for d in _NONCONTENT_DOMAINS)
+# Fragile / non-content domain classification lives in download_rules.py
+# (single source of truth — v6.1 A0.3). Re-exported here under local names
+# so existing callers + pinned tests keep working.
+from download_rules import is_fragile as _is_fragile_pdf_url  # noqa: E402
+from download_rules import is_noncontent as _is_noncontent_url  # noqa: E402
+from download_rules import FRAGILE_PDF_DOMAINS as _FRAGILE_PDF_DOMAINS  # noqa: E402
+from download_rules import NONCONTENT_DOMAINS as _NONCONTENT_DOMAINS  # noqa: E402
 
 
 def _rate_limit():
@@ -265,7 +231,7 @@ def _run_query(query, title, timeout, max_retries):
     for attempt in range(max_retries):
         try:
             _rate_limit()
-            resp = requests.get(SEARCH_URL, params=params, timeout=timeout)
+            resp = get_session().get(SEARCH_URL, params=params, timeout=timeout)
             logger.debug("GoogleSearch response: status=%d title=%s", resp.status_code, title)
             if resp.status_code == 429:
                 logger.debug("GoogleSearch rate-limited (429): title=%s attempt=%d", title, attempt)

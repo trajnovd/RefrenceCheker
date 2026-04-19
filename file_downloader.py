@@ -6,6 +6,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from config import get_pdf_converter, get_pdf_converter_pair
+from http_client import get_session
 
 try:
     import pymupdf4llm
@@ -45,7 +46,15 @@ def _safe_filename(bib_key):
 
 
 def download_reference_files(project_dir, bib_key, result, force=False):
-    """Download available artifacts for a reference. Returns dict of saved filenames."""
+    """Download available artifacts for a reference. Returns dict of saved filenames.
+
+    v6.1 A1: for PDFs, invokes the tiered orchestrator (direct → OA fallbacks
+    → DOI content-negotiation → OpenReview → Wayback). Tier that wins is
+    stamped on result.files_origin.pdf. If the primary URL succeeds, we
+    short-circuit at the first tier (no extra work).
+    """
+    from provenance import record_origin
+    from file_downloader_fallback import download_with_fallback
     safe_key = _safe_filename(bib_key)
     files = {}
 
@@ -59,16 +68,26 @@ def download_reference_files(project_dir, bib_key, result, force=False):
                 except OSError:
                     pass
 
-    # Download PDF
+    # Download PDF — via tier chain. When a result already has a pdf_url we
+    # feed it as the primary; missing pdf_url is OK too (tiers like OpenReview
+    # can discover by title).
     pdf_url = result.get("pdf_url")
-    if pdf_url:
+    if pdf_url or result.get("doi") or result.get("title"):
         filename = safe_key + "_pdf.pdf"
         path = os.path.join(project_dir, filename)
         if force or not os.path.exists(path):
-            if _download_pdf(pdf_url, path):
+            outcome = download_with_fallback(
+                pdf_url, path, bib_key=bib_key, result=result,
+                title=result.get("title"), doi=result.get("doi"),
+                headers_fn=_headers_for,
+            )
+            # Persist a compact download_log (§11.11) capped at 10 entries.
+            result["download_log"] = (outcome.get("log") or [])[:10]
+            if outcome.get("ok"):
                 files["pdf"] = filename
+                # provenance already recorded by the orchestrator
         elif os.path.exists(path):
-            files["pdf"] = filename
+            files["pdf"] = filename  # pre-existing; origin (if any) already persisted
 
     # Save abstract
     abstract = result.get("abstract")
@@ -90,6 +109,7 @@ def download_reference_files(project_dir, bib_key, result, force=False):
         if force or not os.path.exists(path):
             if _download_page(url, path):
                 files["page"] = filename
+                record_origin(result, "page", "direct", url)
         elif os.path.exists(path):
             files["page"] = filename
 
@@ -102,26 +122,15 @@ def download_reference_files(project_dir, bib_key, result, force=False):
     return files
 
 
-_ARXIV_ABS_RE = re.compile(r"https?://arxiv\.org/abs/([\w./-]+?)(?:v\d+)?/?$", re.IGNORECASE)
-_ARXIV_HTML_RE = re.compile(r"https?://arxiv\.org/html/([\w./-]+?)(?:v\d+)?/?$", re.IGNORECASE)
-
-
 def _normalize_bib_url(url):
     """Rewrite known landing-page URLs to their direct-content variants.
 
-    - arxiv.org/abs/<id>   →  arxiv.org/pdf/<id>  (abstract landing page → PDF)
-    - arxiv.org/html/<id>  →  arxiv.org/pdf/<id>  (HTML rendition → PDF, more reliable
-                                                   for downstream extraction)
+    Thin wrapper over `url_normalizers.normalize(url)` — the actual rewriting
+    rules (arXiv abs/html, OpenReview forum, and future A1 additions) live
+    in `url_normalizers.py` as a pluggable registry.
     """
-    if not url:
-        return url
-    m = _ARXIV_ABS_RE.match(url) or _ARXIV_HTML_RE.match(url)
-    if m:
-        arxiv_id = m.group(1)
-        pdf_url = f"https://arxiv.org/pdf/{arxiv_id}"
-        logger.debug("Normalizing arXiv landing URL %s -> %s", url, pdf_url)
-        return pdf_url
-    return url
+    from url_normalizers import normalize
+    return normalize(url)
 
 
 def pre_download_bib_url(project_dir, bib_key, url):
@@ -199,19 +208,24 @@ def replace_reference_source(project_dir, bib_key, result, new_url):
 
     downloaded = False
 
+    from provenance import record_origin, clear_origin
+
     if is_pdf:
         # Clear opposing HTML page (the new source is a PDF)
         _drop("page")
+        clear_origin(result, "page")
         result["url"] = None
         result["pdf_url"] = new_url
         pdf_filename = safe_key + "_pdf.pdf"
         if _download_pdf(new_url, os.path.join(project_dir, pdf_filename)):
             files["pdf"] = pdf_filename
+            record_origin(result, "pdf", "manual_set_link", new_url)
             downloaded = True
         # Note: don't touch existing abstract (it may have come from S2/Crossref).
     else:
         # Clear opposing PDF (the new source is an HTML page)
         _drop("pdf")
+        clear_origin(result, "pdf")
         # Invalidate the abstract: it was tied to the OLD source and is now stale.
         # The HTML content itself becomes the .md body (via _build_reference_md), not an
         # abstract. Abstract stays None unless something else (S2/Crossref) provides one.
@@ -223,6 +237,7 @@ def replace_reference_source(project_dir, bib_key, result, new_url):
         page_path = os.path.join(project_dir, page_filename)
         if _download_page(new_url, page_path):
             files["page"] = page_filename
+            record_origin(result, "page", "manual_set_link", new_url)
             downloaded = True
 
     # Drop stale .md (will be rebuilt below)
@@ -281,6 +296,9 @@ def set_uploaded_pdf(project_dir, bib_key, result, pdf_bytes):
     except OSError as e:
         return {"ok": False, "files": files, "reason": f"Failed to save PDF: {e}"}
     files["pdf"] = pdf_filename
+    from provenance import record_origin, clear_origin
+    clear_origin(result)  # wholesale replace — no prior origin applies
+    record_origin(result, "pdf", "manual_upload", None)
 
     md_filename = _build_reference_md(project_dir, safe_key, bib_key, result, files)
     if md_filename:
@@ -330,6 +348,9 @@ def set_pasted_content(project_dir, bib_key, result, content):
     except OSError as e:
         return {"ok": False, "files": files, "reason": f"Failed to save pasted content: {e}"}
     files["pasted"] = pasted_filename
+    from provenance import record_origin, clear_origin
+    clear_origin(result)  # fresh manual source — drop any prior tier stamps
+    record_origin(result, "pasted", "manual_paste", None)
 
     # Also write a viewable HTML wrapper so the right-panel HTML tab can render it.
     page_filename = safe_key + "_page.html"
@@ -527,7 +548,8 @@ def _download_pdf(url, path, status_out=None):
     and (optionally) `detail` so callers can distinguish failure modes.
     """
     try:
-        resp = requests.get(url, headers=_headers_for(url), timeout=30, stream=True, allow_redirects=True)
+        resp = get_session().get(url, headers=_headers_for(url), timeout=30,
+                                   stream=True, allow_redirects=True)
         if resp.status_code != 200:
             logger.debug("PDF download failed: url=%s status=%d", url, resp.status_code)
             _record_failure(status_out, resp.status_code, _http_failure_kind(resp.status_code))
@@ -651,7 +673,8 @@ def _download_page(url, path, status_out=None):
     See `_download_pdf` for `status_out` semantics.
     """
     try:
-        resp = requests.get(url, headers=_headers_for(url), timeout=20, allow_redirects=True)
+        resp = get_session().get(url, headers=_headers_for(url), timeout=20,
+                                   allow_redirects=True)
         if resp.status_code != 200:
             logger.debug("Page download failed: url=%s status=%d", url, resp.status_code)
             _record_failure(status_out, resp.status_code, _http_failure_kind(resp.status_code))
