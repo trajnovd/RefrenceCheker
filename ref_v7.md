@@ -102,7 +102,7 @@ data_layer/
 - The store's public methods take and return Python dicts / dataclasses. Callers never see `Cursor`, `Row`, or `?` placeholders.
 - Tests for query logic live in `tests/test_reference_store.py`. Tests for higher layers mock the store ABC.
 
-A lint check (ripgrep in CI) enforces this: `rg -n '\\b(SELECT|INSERT|UPDATE|DELETE)\\b' --type py | grep -v 'data_layer/reference_store'` must return empty.
+A lint check (ripgrep in CI) enforces this: `rg -n '\\b(SELECT|INSERT|UPDATE|DELETE|CREATE TABLE|ALTER TABLE)\\b' --type py | grep -v '^data_layer/'` must return empty. The exclusion covers the whole `data_layer/` package (store, migrations, future Postgres sibling) — same pattern as §12.
 
 ### 3.3 `ReferenceStore` ABC
 
@@ -180,7 +180,12 @@ class ReferenceStore(ABC):
 
     # ---------- ref_match (identity verification) ----------
     @abstractmethod
-    def save_ref_match(self, slug: str, bib_key: str, match: dict) -> bool: ...
+    def save_ref_match(self, slug: str, bib_key: str, match: dict) -> bool:
+        """Persist the full match dict in ref_extras.ref_match_json AND mirror
+        match['verdict'] + match.get('confidence') into refs.ref_match_verdict /
+        refs.ref_match_confidence (the two promoted columns, §4.2). Both writes
+        happen in a single transaction so the columns and the JSON never drift.
+        Triggers ref_cache_keys re-indexing via index_for_cache."""
     @abstractmethod
     def get_ref_match(self, slug: str, bib_key: str) -> Optional[dict]: ...
 
@@ -225,6 +230,10 @@ class ReferenceStore(ABC):
     @abstractmethod
     def drop_cache_keys(self, slug: str, bib_key: str) -> None:
         """Force-remove this ref from the global cache (e.g. file deleted)."""
+    @abstractmethod
+    def get_ref_file_hashes(self, ref_id: int) -> dict[str, str]:
+        """Return {filetype: sha256} for a ref's artifacts, used by cache.py
+        to verify integrity before materializing a cache hit."""
 
     # ---------- migration / schema ----------
     @abstractmethod
@@ -322,12 +331,17 @@ def _materialize(slug, ref, cand, files, store) -> dict:
     dst_dir = files.references_dir(slug)
     safe_key = _safe_filename(ref["bib_key"])
 
+    expected_hashes = store.get_ref_file_hashes(cand.ref_id)  # {filetype: sha256}
     new_files = {}
     for filetype, src_filename in cand.files.items():
         src = files.reference_path(cand.project_slug, src_filename)
         if not files.exists(src):
             raise CacheStaleError(f"missing {src}")
-        # Optional: verify sha256 against ref_files row (when stored)
+        # sha256 verification is mandatory on every cache hit (§14, decision 18).
+        # ~50 ms for a 5 MB PDF beats serving a corrupted artifact.
+        expected = expected_hashes.get(filetype)
+        if expected and files.sha256(src) != expected:
+            raise CacheStaleError(f"sha256 mismatch on {src}")
         suffix = _file_suffix(filetype)
         dst_filename = safe_key + suffix
         files.copy_file(src, files.reference_path(slug, dst_filename))
@@ -447,6 +461,12 @@ CREATE TABLE refs (
   bib_url_failure_json TEXT,
   raw_bib TEXT,
   url_source_only INTEGER DEFAULT 0,
+  -- ref_match promotion: these two are queried directly (cache-eligibility
+  -- predicate in §8.3, future "low-confidence refs" reports). Everything else
+  -- about ref_match — evidence dict, manual flag, timestamps — stays in
+  -- ref_extras.ref_match_json. See §4.2 for the rationale.
+  ref_match_verdict TEXT,           -- matched / not_matched / manual_matched / NULL
+  ref_match_confidence REAL,        -- 0.0–1.0 or NULL
   -- bookkeeping
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
@@ -455,6 +475,7 @@ CREATE TABLE refs (
 CREATE INDEX idx_refs_project ON refs(project_id);
 CREATE INDEX idx_refs_doi ON refs(doi) WHERE doi IS NOT NULL;
 CREATE INDEX idx_refs_arxiv ON refs(arxiv_id) WHERE arxiv_id IS NOT NULL;
+CREATE INDEX idx_refs_verdict ON refs(ref_match_verdict) WHERE ref_match_verdict IS NOT NULL;
 
 CREATE TABLE ref_files (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -498,21 +519,6 @@ CREATE TABLE ref_cache_keys (
 );
 CREATE INDEX idx_cache_keys_lookup ON ref_cache_keys(key_type, key_value);
 
-CREATE TABLE citations (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-  bib_key TEXT NOT NULL,
-  line_number INTEGER,
-  position INTEGER,
-  end_position INTEGER,
-  cite_command TEXT,
-  context_before TEXT,
-  context_after TEXT,
-  claim_check_id INTEGER REFERENCES claim_checks(id),
-  ord INTEGER NOT NULL              -- preserves .tex order in the UI list
-);
-CREATE INDEX idx_citations_project ON citations(project_id);
-
 CREATE TABLE claim_checks (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -529,6 +535,21 @@ CREATE TABLE claim_checks (
   UNIQUE(project_id, cache_key)
 );
 
+CREATE TABLE citations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  bib_key TEXT NOT NULL,
+  line_number INTEGER,
+  position INTEGER,
+  end_position INTEGER,
+  cite_command TEXT,
+  context_before TEXT,
+  context_after TEXT,
+  claim_check_id INTEGER REFERENCES claim_checks(id),
+  ord INTEGER NOT NULL              -- preserves .tex order in the UI list
+);
+CREATE INDEX idx_citations_project ON citations(project_id);
+
 CREATE TABLE activity (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -540,9 +561,20 @@ CREATE TABLE activity (
 CREATE INDEX idx_activity_project ON activity(project_id, ts DESC);
 ```
 
-### 4.2 Why JSON columns for `_extras`?
+### 4.2 Why JSON columns for `_extras` (with two promoted exceptions)
 
-`download_log`, `ref_match`, and `pdf_url_fallbacks` are small (under 5 KB), only read when rendering the validity report or the review pane, and have unstable schemas (new tier names, new ref_match fields ship every few weeks). Normalizing them into separate tables would mean writing a migration every time we add a tier; JSON is the right call.
+`download_log`, `ref_match.evidence`, and `pdf_url_fallbacks` are small (under 5 KB), only read when rendering the validity report or the review pane, and have unstable schemas (new tier names, new ref_match evidence keys ship every few weeks). Normalizing them into separate tables would mean writing a migration every time we add a tier — for query power we don't use. The decision rule:
+
+> **JSON when:** field set evolves frequently AND always read with parent AND never used as a query predicate AND stays small AND has nested structure that wouldn't normalize cleanly anyway.
+
+All three blobs satisfy every criterion, so they live in `ref_extras` as JSON.
+
+**The two promoted exceptions** — `ref_match.verdict` and `ref_match.confidence` — are stable enums/scalars used as query predicates:
+
+- `verdict` gates cache eligibility (§8.3) — checked on every `save_ref_match`.
+- `confidence` powers operational visibility (e.g. *"refs below 0.7 across all projects"*) and could anchor future ranking logic.
+
+Promoting them to columns on `refs` (with an index on `verdict`) costs one cheap migration up front and ~10 LOC in the store, in exchange for clean SQL predicates instead of `json_extract` everywhere. The full `ref_match` dict — `evidence`, `manual`, timestamps, future fields — still lives in `ref_extras.ref_match_json`. The store is responsible for keeping the two stores consistent inside `save_ref_match` (single transaction).
 
 ### 4.3 What stays on disk
 
@@ -780,7 +812,7 @@ The bib file isn't just an input we read once — users will fix typos, add a mi
 - `PUT  /api/projects/<slug>/bib` → body `{content, expected_mtime}`. Saves to `source/<bib>`, re-parses, calls `store.save_parsed_refs`. Returns the new mtime + list of bib_keys whose entries changed.
 - `POST /api/projects/<slug>/bib/push` → after a local save, push to the provider.
 
-The `.tex` file does not get equivalent write endpoints in v7 — its existing read-only behavior is preserved.
+The `.tex` file already has its write endpoint (`PUT /api/projects/<slug>/save-tex`) and its editor in View 4 (Citation Review); v7 reuses both unchanged. Phase I adds a sibling `POST /api/projects/<slug>/tex/push` so the existing `.tex` editor gains a Save-and-push-to-provider button mirroring the new `.bib` flow (§14, decision 19).
 
 ---
 
@@ -859,20 +891,20 @@ Title-only (no authors) does NOT enter the cache. Too risky.
 ### 8.3 Cache eligibility (what gets indexed)
 
 A ref enters `ref_cache_keys` when:
-- `result.status ∈ {found_pdf, found_web_page}`
-- `ref_match.verdict ∈ {matched, manual_matched}`
+- `refs.status ∈ {found_pdf, found_web_page}`
+- `refs.ref_match_verdict ∈ {matched, manual_matched}` *(promoted column from §4.2 — no JSON parsing on the hot path)*
 - At least one of (doi, arxiv_id, (title AND authors)) is set
 
-Re-indexing happens automatically inside `store.save_result` and `store.save_ref_match`. A ref that flips back to `not_matched` is removed via `DELETE FROM ref_cache_keys WHERE ref_id=?`.
+Re-indexing happens automatically inside `store.save_result` and `store.save_ref_match`. The eligibility query is a plain `SELECT id FROM refs WHERE ref_match_verdict IN ('matched','manual_matched') AND status IN ('found_pdf','found_web_page') AND id=?` — no `json_extract`. A ref that flips back to `not_matched` is removed via `DELETE FROM ref_cache_keys WHERE ref_id=?`.
 
 ### 8.4 Materialization (cache hit handling)
 
 `data_layer/cache.py:lookup_and_materialize` (§3.5) does it. Steps:
 
 1. Query `store.find_cache_candidates` for matching `ref_cache_keys` rows; return ordered by `updated_at DESC`.
-2. For each candidate: verify each source file exists on disk via `FileManager.exists`. (Optional: verify sha256 matches `ref_files.sha256`.)
+2. For each candidate: verify each source file exists on disk via `FileManager.exists` AND that `FileManager.sha256(src)` matches the `ref_files.sha256` recorded at indexing time. The hash check is mandatory (per §14, decision 18) — ~50 ms for a 5 MB PDF beats serving a corrupted artifact.
 3. On verification pass: `FileManager.copy_file` each artifact from `references_dir(source_slug)` to `references_dir(dest_slug)`, renaming to the destination's `bib_key`. Build a result dict with `files_origin.tier="cache_hit"` + source provenance fields. Return.
-4. On verification fail: `store.drop_cache_keys(source_slug, source_bib_key)` and try the next candidate. Falls through to `None` if all candidates are stale.
+4. On verification fail (missing file OR sha256 mismatch): `store.drop_cache_keys(source_slug, source_bib_key)` and try the next candidate. Falls through to `None` if all candidates are stale.
 
 ### 8.5 Multi-user behavior
 
@@ -918,7 +950,8 @@ Steps:
      - `*.tex`, `*.bib` from project root → `source/`.
      - `*_pdf.pdf`, `*_page.html`, `*_abstract.txt`, `*_pasted.md`, `<bib_key>.md` → `references/`.
      - Any `validity_report.html` / `references.zip` / `report.zip` → `validity-report/`.
-   - **Insert DB rows** from `project.json`: `projects` (with default user, `layout_version=2`), `parsed_refs`, `refs`, `ref_files` (compute sha256 of each artifact), `ref_files_origin`, `ref_extras`, `citations`, `claim_checks`, `activity`. Carry over the source state as `source_kind="upload"`, `source_state_json={"tex_filename":..., "bib_filename":...}`.
+   - **Insert DB rows** from `project.json`: `projects` (with default user, `layout_version=2`), `parsed_refs`, `refs`, `ref_files` (compute sha256 of each artifact — required for cache verification per §8.4), `ref_files_origin`, `ref_extras`, `citations`, `claim_checks`, `activity`. Carry over the source state as `source_kind="upload"`, `source_state_json={"tex_filename":..., "bib_filename":...}`.
+   - **Populate the promoted `ref_match` columns** (§4.2): for each ref with a `ref_match` blob in `project.json`, copy `ref_match["verdict"]` → `refs.ref_match_verdict` and `ref_match.get("confidence")` → `refs.ref_match_confidence`. The full dict still goes to `ref_extras.ref_match_json`.
    - **Index cache-eligible refs** into `ref_cache_keys`.
    - **Rename `project.json` → `project.json.migrated`** (don't delete — safety net for two weeks).
 4. **Print summary**: *"N projects migrated, M refs indexed for cache, K files hashed."*
@@ -977,7 +1010,7 @@ Approximate touch list. The data-layer abstraction makes most call-site changes 
 | `static/js/app.js` | Wire provider tabs, the new `.bib` editor view, Save / Save-and-push, mtime concurrency, Pull/Push, Re-download all + manual-references modal, `cache_hit` tier badge. Show *"set `<env var>` and restart"* hint when a provider reports unconfigured. |
 | `scripts/migrate_to_v7.py` | **New.** Migration script per §10. |
 | `scripts/dump_to_project_json.py` | **New.** Reverse migration escape hatch. |
-| `tests/test_reference_store.py` | **New.** All store CRUD against `:memory:` SQLite. Cache lookup + indexing. Schema migration. |
+| `tests/test_reference_store.py` | **New.** All store CRUD against `:memory:` SQLite. Cache lookup + indexing. Schema migration. **Dual-write invariant**: `save_ref_match` updates `refs.ref_match_verdict` / `refs.ref_match_confidence` AND `ref_extras.ref_match_json` atomically; round-trip equality between the columns and the JSON's `verdict` / `confidence` fields is verified. |
 | `tests/test_file_manager.py` | **New.** Path helpers, atomic writes, mtime concurrency, sha256, listings (skip dot-prefixed). |
 | `tests/test_cache.py` | **New.** Materialization with mocked store + tmp-path file manager. Stale-file fallthrough. |
 | `tests/test_bib_io.py` | **New.** Round-trips, mtime concurrency rejection, `diff_changed_keys` correctness. |
@@ -1003,12 +1036,12 @@ Each phase is independently shippable and testable.
 | **D** | Provider abstraction + `UploadProvider`. Create-project becomes data-driven from `/api/providers`. **No user-visible behavior change.** |
 | **E** | Bib editing (§6). `bib_io.py` + endpoints + UI tab. |
 | **F** | Re-download all references (§7). |
-| **G** | Global cache (§8) — `lookup_and_materialize` wired into `_process_ref_with_bib_url`, `cache_hit` UI badge. |
+| **G** | Global cache (§8) — `lookup_and_materialize` wired into `_process_ref_with_bib_url`, `cache_hit` UI badge, mandatory sha256 verification on every hit (§14, decision 18). |
 | **H** | Overleaf provider — read (import + select). |
-| **I** | Overleaf provider — write (pull + push + bib editor "Save & push"). |
+| **I** | Overleaf provider — write (pull + push + bib editor "Save & push" + tex editor "Save & push"). New endpoints `POST /api/projects/<slug>/{bib,tex}/push`. |
 | **(Future) J** | GitHub provider. ~150 LOC + tests once `_git_helpers.py` is established. |
 | **(Future) K** | Google Docs provider. Different transport, same interface. |
-| **(Future) L** | Optional: cache-savings dashboard card; sha256 verification on every cache hit; reverse-migration script auto-tested in CI. |
+| **(Future) L** | Polish: cache-savings dashboard card; reverse-migration script auto-tested in CI; cache-warmup CLI (see §15). |
 
 Phase A–C is the **architectural** part. D–I is the **product** part. J–L is **future**.
 
@@ -1030,22 +1063,23 @@ Phase A–C is the **architectural** part. D–I is the **product** part. J–L 
 12. **`tex_content` storage**: stays on disk in `source/<tex>` (not in DB). The DB only stores the filename.
 13. **Reverse migration**: `scripts/dump_to_project_json.py` exists as an escape hatch.
 14. **CI lint**: `rg` check rejects SQL keywords outside `data_layer/`.
+15. **WAL retention**: rely on SQLite's auto-checkpoint (1000 pages, the default). No periodic VACUUM job — our scale doesn't warrant it; revisit if the file ever exceeds ~500 MB.
+16. **`project.json.migrated` retention**: kept for 2 weeks, then auto-deleted by a startup-time sweep. Each deletion logged to `activity` so it shows up in the project's activity log.
+17. **Cache index cascade on project delete**: yes — `ref_cache_keys.ref_id` has `ON DELETE CASCADE` (via `refs.project_id`). Deleting a project automatically purges its cache index entries; future lookups can't 500 by referencing vanished files.
+18. **sha256 verification on every cache hit**: mandatory, not opportunistic. Hash is recorded into `ref_files.sha256` when the ref is indexed for cache (§8.3) and re-checked by `cache.lookup_and_materialize` before any copy (§8.4 step 2). Mismatch → drop the cache key and try the next candidate.
+19. **`.tex` "Save & push to provider"**: yes — the existing View 4 `.tex` editor gains a Save-and-push button alongside its local-save, mirroring the `.bib` flow. Shipped in Phase I alongside bib push for behavioral parity.
 
 ---
 
-## 15. Open questions
+## 15. Future enhancements (post-v7)
 
-These don't block Phase A — answers can land before Phase B (migration script).
+Tracked separately, not blocking v7:
 
-1. **WAL retention**: SQLite WAL files can grow if not checkpointed. Auto-checkpoint at 1000 pages (the default) is fine for our scale; do you want a periodic VACUUM? *(Default: rely on auto.)*
-2. **`project.json.migrated` retention**: keep for 2 weeks then auto-delete? *(Default: yes, log when deleted.)*
-3. **Cache hit when source project is deleted**: when a project is deleted, do we cascade-drop its cache index entries? *(Default: YES — cache hits referencing a deleted project's files would 500. The `ON DELETE CASCADE` on `ref_cache_keys.ref_id` handles this automatically.)*
-4. **sha256 verification on every cache hit vs only on suspect**: cheap (~50ms for a 5MB PDF) but adds latency. *(Default: verify on every hit; the cost beats serving a corrupted file.)*
-<!-- Question 5 removed: the .tex editor in View 4 (Citation Review) is already
-     fully editable via PUT /api/projects/<slug>/save-tex. v7 reuses the same
-     editor component for .bib (§6). No further .tex changes required. -->
-
-5. **`.tex` "Save & push to provider"**: should the existing `.tex` editor get a Save-and-push-to-Overleaf button alongside its current local-save, mirroring the new `.bib` flow? *(Default: YES — small addition, parity with `.bib`. Implement in Phase I alongside the bib push.)*
+- **Cache-savings dashboard card** — *"X of Y refs (Z%) served from cache, ~N MB saved"* per project, plus a global aggregate across all users.
+- **Reverse-migration auto-test in CI** — round-trip migrate → dump → re-migrate to guarantee the v7 ↔ v6 bridge stays operational.
+- **Auth + multi-user UI** — wire Flask-Login (or similar) onto the `users.user_id` column that v7 already populates. Cache search stays global (per §8.5).
+- **Additional providers** — GitHub (Phase J) and Google Docs (Phase K) reuse the `SourceProvider` ABC.
+- **Cache warmup CLI** — `python scripts/cache_warm.py <slug>` to pre-populate cache index for a freshly imported large project before the user clicks Run.
 
 Ready to start Phase A.
  
